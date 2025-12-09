@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { HelpTooltip } from '@/components/ui/HelpTooltip';
@@ -6,7 +6,7 @@ import { DemosaicAlgorithm, CFAType, PixelTraceStep, DemosaicInput, ErrorStats }
 import 'katex/dist/katex.min.css';
 import { InlineMath, BlockMath } from 'react-katex';
 import { InteractiveDemosaicVisualizer } from './InteractiveDemosaicVisualizer';
-import { ZoomIn } from 'lucide-react';
+import { ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
 import { computeLaplacianMagnitude, normalizeScalarField, heatmapFromNormalizedField } from '@/lib/utils';
 
 interface MathPanelProps {
@@ -33,6 +33,19 @@ interface ScalarFieldHeatmapProps {
 
 function ScalarFieldHeatmap({ field, width, height, label }: ScalarFieldHeatmapProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [isDragging, setIsDragging] = useState(false);
+  const lastMousePos = useRef({ x: 0, y: 0 });
+  const zoomRef = useRef(zoom);
+  const panRef = useRef(pan);
+  
+  // Keep refs in sync with state
+  useEffect(() => {
+    zoomRef.current = zoom;
+    panRef.current = pan;
+  }, [zoom, pan]);
 
   useEffect(() => {
     if (!field || !canvasRef.current) return;
@@ -46,14 +59,113 @@ function ScalarFieldHeatmap({ field, width, height, label }: ScalarFieldHeatmapP
     ctx.putImageData(img, 0, 0);
   }, [field, width, height]);
 
+  // Set up native wheel event listener to avoid passive listener issues
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element) return;
+    
+    const handleWheel = (e: WheelEvent) => {
+      // Allow page scrolling if not zooming significantly or at edges, but 
+      // for consistency, let's zoom if inside the component.
+      const currentZoom = zoomRef.current;
+      const currentPan = panRef.current;
+      const scaleFactor = 0.1;
+      const delta = -Math.sign(e.deltaY) * scaleFactor;
+      const newZoom = Math.max(1, Math.min(currentZoom + delta * currentZoom, 20));
+      
+      if (newZoom !== currentZoom && containerRef.current) {
+        // Only prevent default if we are actually zooming (to avoid blocking scroll when at limit)
+        e.preventDefault();
+        
+        const rect = containerRef.current.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+
+        const worldX = (mouseX - currentPan.x) / currentZoom;
+        const worldY = (mouseY - currentPan.y) / currentZoom;
+
+        const newPanX = mouseX - worldX * newZoom;
+        const newPanY = mouseY - worldY * newZoom;
+
+        setZoom(newZoom);
+        setPan({ x: newPanX, y: newPanY });
+      }
+    };
+    
+    element.addEventListener('wheel', handleWheel, { passive: false });
+    
+    return () => {
+      element.removeEventListener('wheel', handleWheel);
+    };
+  }, []); // Empty deps - handler reads from refs
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+    lastMousePos.current = { x: e.clientX, y: e.clientY };
+  };
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (!isDragging) return;
+    e.preventDefault();
+    const dx = e.clientX - lastMousePos.current.x;
+    const dy = e.clientY - lastMousePos.current.y;
+    setPan(p => ({ x: p.x + dx, y: p.y + dy }));
+    lastMousePos.current = { x: e.clientX, y: e.clientY };
+  };
+
+  const handleMouseUp = () => setIsDragging(false);
+  const handleMouseLeave = () => setIsDragging(false);
+
+  const handleZoomButton = (direction: 'in' | 'out') => {
+     if (!containerRef.current) return;
+     const rect = containerRef.current.getBoundingClientRect();
+     const cx = rect.width / 2;
+     const cy = rect.height / 2;
+     const factor = direction === 'in' ? 1.2 : 1/1.2;
+     const newZoom = Math.max(1, Math.min(20, zoom * factor));
+     
+     const worldX = (cx - pan.x) / zoom;
+     const worldY = (cy - pan.y) / zoom;
+     
+     const newPanX = cx - worldX * newZoom;
+     const newPanY = cy - worldY * newZoom;
+     
+     setZoom(newZoom);
+     setPan({ x: newPanX, y: newPanY });
+  };
+
+  const resetZoom = () => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  };
+
   return (
     <div className="space-y-1">
-      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</div>
-      <div className="border rounded overflow-hidden bg-background">
+      <div className="flex items-center justify-between">
+        <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</div>
+        <div className="flex items-center gap-1 bg-muted/50 rounded px-1">
+           <button onClick={() => handleZoomButton('out')} className="p-1 hover:text-primary rounded-sm hover:bg-background/50" title="Zoom Out"><ZoomOut className="w-3 h-3" /></button>
+           <span className="text-[10px] w-8 text-center font-mono select-none">{Math.round(zoom * 100)}%</span>
+           <button onClick={() => handleZoomButton('in')} className="p-1 hover:text-primary rounded-sm hover:bg-background/50" title="Zoom In"><ZoomIn className="w-3 h-3" /></button>
+           <button onClick={resetZoom} className="p-1 hover:text-primary ml-1 rounded-sm hover:bg-background/50" title="Reset View"><RotateCcw className="w-3 h-3" /></button>
+        </div>
+      </div>
+      <div 
+        ref={containerRef}
+        className={`border rounded overflow-hidden bg-background relative touch-none ${isDragging ? 'cursor-grabbing' : 'cursor-grab'}`}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseLeave}
+      >
         <canvas
           ref={canvasRef}
-          className="w-full h-auto block"
-          style={{ imageRendering: 'pixelated' }}
+          className="w-full h-auto block origin-top-left transition-transform duration-75 ease-linear"
+          style={{ 
+             imageRendering: 'pixelated',
+             transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`
+          }}
         />
       </div>
     </div>
@@ -73,6 +185,9 @@ const SYNTHETIC_EXPLANATIONS: Record<string, {
                 With <strong>{cfa.toUpperCase()}</strong> and <strong>{algo}</strong>, you likely see color rings where there should only be black and white. 
                 {algo === 'nearest' && " Nearest Neighbor produces jagged, blocky artifacts."}
                 {algo === 'bilinear' && " Bilinear interpolation blurs the high frequencies but still suffers from 'zippering' false colors."}
+                {(algo === 'niu_edge_sensing' || algo === 'lien_edge_based') && " Edge-aware algorithms should show reduced false colors compared to bilinear, as they interpolate along edges rather than across them."}
+                {algo === 'wu_polynomial' && " Polynomial interpolation provides better frequency response, reducing aliasing artifacts while maintaining edge sharpness."}
+                {algo === 'kiku_residual' && " Residual interpolation adapts to local structures, showing improved artifact reduction especially in high-frequency regions."}
             </>
         )
     },
@@ -84,6 +199,7 @@ const SYNTHETIC_EXPLANATIONS: Record<string, {
                 A 1-pixel checkerboard is the worst-case scenario for <strong>{cfa.toUpperCase()}</strong>. 
                 {algo === 'nearest' && " It completely breaks the structure, creating large solid color blocks."}
                 {algo === 'bilinear' && " It averages out to a muddy gray, losing all detail."}
+                {(algo === 'niu_edge_sensing' || algo === 'lien_edge_based' || algo === 'wu_polynomial' || algo === 'kiku_residual') && " Advanced algorithms may preserve some structure better than bilinear, but this pattern remains extremely challenging due to its frequency being at the Nyquist limit."}
             </>
         )
     },
@@ -92,7 +208,7 @@ const SYNTHETIC_EXPLANATIONS: Record<string, {
         whatToLookFor: "Smooth gradients should remain smooth. Banding or jagged transitions indicate interpolation errors.",
         analysis: (cfa, algo) => (
             <>
-                <strong>{algo}</strong> demosaicing {algo === 'nearest' ? "struggles with smooth transitions, creating 'steps' in the gradient." : "generally handles gradients well, but may desaturate high-frequency color borders."}
+                <strong>{algo}</strong> demosaicing {algo === 'nearest' ? "struggles with smooth transitions, creating 'steps' in the gradient." : algo === 'bilinear' ? "generally handles gradients well, but may desaturate high-frequency color borders." : "should handle smooth gradients well, with edge-aware methods preserving transitions more accurately than simple bilinear interpolation."}
             </>
         )
     },
@@ -104,6 +220,69 @@ const SYNTHETIC_EXPLANATIONS: Record<string, {
                 Diagonal lines are challenging on a square <strong>{cfa.toUpperCase()}</strong> grid. 
                 {algo === 'nearest' && " You will see significant jagged edges (aliasing)."}
                 {algo === 'bilinear' && " The lines will be smoother but slightly blurred."}
+                {(algo === 'niu_edge_sensing' || algo === 'lien_edge_based') && " Edge-aware algorithms should better preserve diagonal edges by detecting edge direction and interpolating accordingly."}
+                {algo === 'wu_polynomial' && " Polynomial interpolation may provide sharper diagonal lines with reduced aliasing."}
+                {algo === 'kiku_residual' && " Residual interpolation adapts to diagonal structures, potentially reducing artifacts along the lines."}
+            </>
+        )
+    },
+    'diagonal': {
+        title: "Diagonal Lines",
+        whatToLookFor: "Look for 'zippering' artifacts along diagonal lines. Bayer patterns are particularly sensitive to diagonal aliasing, which can create false colors.",
+        analysis: (cfa, algo) => (
+            <>
+                Diagonal lines at 45° angles are the worst-case scenario for <strong>{cfa.toUpperCase()}</strong> patterns. 
+                {algo === 'nearest' && " You'll see severe zippering (alternating color bands) along the lines."}
+                {algo === 'bilinear' && " The zippering is reduced but still visible, especially with high-contrast lines."}
+                {(algo === 'niu_edge_sensing' || algo === 'lien_edge_based') && " Edge-aware methods should significantly reduce zippering by detecting diagonal edges and interpolating along them."}
+                {algo === 'wu_polynomial' && " Polynomial interpolation may reduce zippering artifacts through better local structure modeling."}
+                {algo === 'kiku_residual' && " Residual interpolation adapts to diagonal structures, showing improved zippering reduction."}
+                The square grid structure of CFA patterns doesn't align well with diagonal features, but advanced algorithms mitigate this.
+            </>
+        )
+    },
+    'sine': {
+        title: "Sine Wave Gratings",
+        whatToLookFor: "Observe how different frequencies are handled. High frequencies near Nyquist should show aliasing and false colors. The three regions test horizontal, vertical, and diagonal orientations.",
+        analysis: (cfa, algo) => (
+            <>
+                Sine gratings test the frequency response of <strong>{algo}</strong> demosaicing. 
+                {algo === 'nearest' && " You'll see strong aliasing at high frequencies, with false colors appearing where there should only be grayscale."}
+                {algo === 'bilinear' && " The algorithm acts as a low-pass filter, blurring high frequencies but reducing aliasing artifacts."}
+                {(algo === 'niu_edge_sensing' || algo === 'lien_edge_based') && " Edge-aware algorithms should show better frequency response with reduced false colors, especially for horizontal and vertical gratings."}
+                {algo === 'wu_polynomial' && " Polynomial interpolation provides superior frequency response, reducing aliasing while maintaining signal fidelity better than bilinear."}
+                {algo === 'kiku_residual' && " Residual interpolation adapts to frequency content, showing improved handling of high-frequency components."}
+                Diagonal gratings typically show the worst artifacts due to the square grid structure.
+            </>
+        )
+    },
+    'patches': {
+        title: "Color Patches",
+        whatToLookFor: "Pure color squares should remain saturated and accurate. Look for color bleeding at edges, desaturation, or incorrect color reproduction.",
+        analysis: (cfa, algo) => (
+            <>
+                Color patches test color accuracy and saturation preservation. 
+                {algo === 'nearest' && " You may see color bleeding at patch boundaries and slight desaturation due to incorrect neighbor selection."}
+                {algo === 'bilinear' && " Colors should be more accurate, but edges between patches may show color fringing or desaturation."}
+                {(algo === 'niu_edge_sensing' || algo === 'lien_edge_based') && " Edge-aware methods should preserve color saturation better at patch boundaries by avoiding interpolation across edges."}
+                {algo === 'wu_polynomial' && " Polynomial interpolation may provide more accurate color reproduction with better saturation preservation."}
+                {algo === 'kiku_residual' && " Residual interpolation adapts to color boundaries, showing improved color accuracy and reduced fringing."}
+                The <strong>{cfa.toUpperCase()}</strong> pattern's color distribution affects how well each primary color is captured.
+            </>
+        )
+    },
+    'fringes': {
+        title: "Color Fringes",
+        whatToLookFor: "Thin colored lines on neutral backgrounds should remain crisp. Look for color bleeding, false colors spreading beyond the lines, or desaturation of the colored lines.",
+        analysis: (cfa, algo) => (
+            <>
+                Color fringes are a common real-world scenario (e.g., chromatic aberration). 
+                {algo === 'nearest' && " You'll see significant color bleeding, with false colors spreading into the neutral gray background."}
+                {algo === 'bilinear' && " The bleeding is reduced, but thin lines may appear slightly desaturated or blurred."}
+                {(algo === 'niu_edge_sensing' || algo === 'lien_edge_based') && " Edge-aware algorithms should better preserve thin colored lines by detecting edges and avoiding interpolation that would cause bleeding."}
+                {algo === 'wu_polynomial' && " Polynomial interpolation may preserve thin lines more accurately with reduced bleeding into the background."}
+                {algo === 'kiku_residual' && " Residual interpolation adapts to the high-frequency color boundaries, showing improved preservation of thin colored lines."}
+                This pattern is particularly challenging because it combines high spatial frequency (thin lines) with pure colors.
             </>
         )
     }
@@ -240,6 +419,48 @@ export function DemosaicMathExplanation({
                         <p>Where <InlineMath math="\Delta_R" /> is the Laplacian of the Red channel (2nd derivative), effectively using the Red channel's high-frequency detail to guide the Green interpolation.</p>
                       </>
                     )}
+                    {algorithm === 'niu_edge_sensing' && (
+                      <>
+                        <p><strong>Low-Cost Edge Sensing</strong> (Niu et al., 2018). This algorithm improves upon the Hamilton-Adams method by introducing a low-cost edge sensing scheme that guides interpolation using directional variations.</p>
+                        <p>The algorithm computes directional variations in horizontal, vertical, and diagonal directions:</p>
+                        <BlockMath math="\Delta_H = |I(x+1,y) - I(x-1,y)|, \quad \Delta_V = |I(x,y+1) - I(x,y-1)|" />
+                        <p>These variations are then weighted using a logistic function to determine edge strength:</p>
+                        <BlockMath math="w = \frac{1}{1 + e^{-k(\Delta - \theta)}}" />
+                        <p>Where <InlineMath math="k" /> controls steepness and <InlineMath math="\theta" /> is the edge detection threshold. The algorithm interpolates along edges (where variation is low) rather than across them, preserving sharp boundaries while maintaining computational efficiency.</p>
+                        <p><strong>Key advantage:</strong> Achieves high accuracy with low computational cost, processing high-resolution images much faster than top-performing methods while maintaining comparable quality.</p>
+                      </>
+                    )}
+                    {algorithm === 'lien_edge_based' && (
+                      <>
+                        <p><strong>Efficient Edge-Based Technique</strong> (Lien et al., 2017). This method uses simple operations (addition, subtraction, shift, comparison) to detect edges and guide interpolation, making it highly suitable for hardware implementation.</p>
+                        <p>The algorithm detects edge direction by comparing color differences:</p>
+                        <BlockMath math="\text{edge} = \begin{cases} \text{horizontal} & \text{if } |I(x-1,y) - I(x+1,y)| < |I(x,y-1) - I(x,y+1)| \\ \text{vertical} & \text{otherwise} \end{cases}" />
+                        <p>Interpolation is then performed along the detected edge direction to preserve structural details. For example, if a horizontal edge is detected, the algorithm interpolates vertically (along the edge) rather than horizontally (across the edge).</p>
+                        <p><strong>Key advantage:</strong> Designed for efficient VLSI implementation with minimal line buffering (only 4 lines), enabling real-time processing at high throughput rates (approximately 200 million samples per second).</p>
+                      </>
+                    )}
+                    {algorithm === 'wu_polynomial' && (
+                      <>
+                        <p><strong>Polynomial Interpolation</strong> (Wu et al., 2016). This algorithm uses polynomial interpolation instead of traditional bilinear or Laplacian predictors, providing more accurate estimation of missing color values.</p>
+                        <p>The method introduces polynomial error predictors that better capture local image structure. For a set of neighboring values, the algorithm fits a polynomial:</p>
+                        <BlockMath math="P_n(x) = \sum_{i=0}^{n} a_i x^i" />
+                        <p>Where <InlineMath math="n" /> is the polynomial degree (typically 2-3). The algorithm also classifies edges using color differences to guide the interpolation process, then applies a weighted sum strategy in a refinement stage to reduce artifacts.</p>
+                        <p><strong>Key advantage:</strong> More accurate than traditional interpolation methods, particularly effective for mobile devices and tablets where both quality and computational efficiency are important.</p>
+                      </>
+                    )}
+                    {algorithm === 'kiku_residual' && (
+                      <>
+                        <p><strong>Residual Interpolation</strong> (Kiku et al., 2016). This algorithm moves beyond traditional color difference methods by interpolating residuals—the differences between observed and estimated values—rather than directly interpolating colors.</p>
+                        <p>The process involves three main steps:</p>
+                        <ol className="list-decimal list-inside space-y-1 text-xs">
+                          <li><strong>Initial estimation:</strong> Compute an initial estimate using simple interpolation (e.g., bilinear): <InlineMath math="\hat{I}_0" /></li>
+                          <li><strong>Residual calculation:</strong> Compute residuals at observed pixels: <InlineMath math="R = I_{observed} - \hat{I}_0" /></li>
+                          <li><strong>Residual interpolation:</strong> Interpolate residuals to missing locations and refine: <InlineMath math="\hat{I} = \hat{I}_0 + \text{Interp}(R)" /></li>
+                        </ol>
+                        <p>This approach adapts to local image structures and varying spectral correlations, effectively reducing artifacts and improving color accuracy.</p>
+                        <p><strong>Key advantage:</strong> Superior performance in both objective metrics and visual quality compared to color difference methods, with better artifact reduction and detail preservation.</p>
+                      </>
+                    )}
                  </div>
               </div>
               
@@ -363,7 +584,26 @@ export function DemosaicMathExplanation({
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div className="space-y-1">
-                      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">PSNR (dB)</div>
+                      <div className="flex items-center gap-1">
+                        <div className="text-[10px] uppercase tracking-wide text-muted-foreground">PSNR (dB)</div>
+                        <HelpTooltip className="h-3 w-3" content={
+                          <div className="space-y-2">
+                            <div>
+                              <strong>Peak Signal-to-Noise Ratio (PSNR)</strong>
+                            </div>
+                            <div>Higher is better. Measures quality of reconstruction.</div>
+                            <div className="pt-1 border-t border-yellow-200">
+                              <div className="font-semibold mb-1">Interpretation:</div>
+                              <div className="space-y-0.5 text-xs">
+                                <div>• <strong>&gt; 40 dB:</strong> Excellent — artifacts barely visible</div>
+                                <div>• <strong>30-40 dB:</strong> Good — minor artifacts</div>
+                                <div>• <strong>20-30 dB:</strong> Fair — noticeable artifacts</div>
+                                <div>• <strong>&lt; 20 dB:</strong> Poor — severe artifacts</div>
+                              </div>
+                            </div>
+                          </div>
+                        } />
+                      </div>
                       <div className="font-mono text-xs">
                         <div>Total: {errorStats.psnr.total.toFixed(2)}</div>
                         <div className="text-muted-foreground">

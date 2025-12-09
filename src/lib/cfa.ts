@@ -45,16 +45,8 @@ export const simulateCFA = (
     getChannel = getBayerKernel(layout);
   } else if (type === 'xtrans') {
     getChannel = getXTransKernel();
-  } else {
-    // Foveon is stack, but for simulation we might flatten or keep separate.
-    // If we simulate Foveon as a single plane, it's wrong. 
-    // But our DemosaicInput has cfaData as Float32Array. 
-    // For Foveon, maybe we assume 3 planes interlaced or just RGB full?
-    // Let's stick to Bayer/XTrans for 2D CFA array. Foveon will need special handling.
-    // For now fallback to Bayer RGGB
-    getChannel = getBayerKernel('RGGB');
   }
-
+  
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const ch = getChannel(x, y);

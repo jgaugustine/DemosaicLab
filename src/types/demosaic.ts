@@ -5,7 +5,11 @@ export type DemosaicAlgorithm =
   | 'bilinear' 
   | 'malvar' 
   | 'high_quality' // placeholder for a better algo
-  | 'custom'; // placeholder for user custom
+  | 'custom' // placeholder for user custom
+  | 'niu_edge_sensing'
+  | 'wu_polynomial'
+  | 'lien_edge_based'
+  | 'kiku_residual';
 
 export interface DemosaicParams {
   // General params
@@ -19,6 +23,11 @@ export interface DemosaicParams {
   
   // Foveon params
   mixStrength?: number;
+  
+  // Algorithm-specific params
+  niuLogisticThreshold?: number; // threshold for edge detection (default: 0.1)
+  wuPolynomialDegree?: number; // polynomial degree (typically 2-3, default: 2)
+  kikuResidualIterations?: number; // number of residual refinement iterations (default: 1)
 }
 
 export interface PixelRGB {

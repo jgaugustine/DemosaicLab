@@ -9,12 +9,102 @@ export async function decodeDNG(file: File): Promise<DemosaicInput> {
     throw new Error("No IFDs found in DNG");
   }
   
-  // Usually the RAW data is in the first IFD or specifically marked
-  // For DNG, the main image is often IFD 0, but sometimes previews are there.
-  // We need 'NewSubfileType' to distinguish. 0 = main image.
+  // Log all IFDs and their properties for debugging
+  console.log(`UTIF decoded ${ifds.length} IFD(s)`);
+  for (let i = 0; i < ifds.length; i++) {
+    const ifd = ifds[i];
+    const width = ifd.width || (ifd.t256 ? ifd.t256[0] : 0);
+    const height = ifd.height || (ifd.t257 ? ifd.t257[0] : 0);
+    const newSubfileType = ifd.t254 ? ifd.t254[0] : 'undefined';
+    const photometric = ifd.t262 ? ifd.t262[0] : 'undefined';
+    const hasSubIFDs = ifd.t330 ? `Yes (${ifd.t330.length} SubIFDs at offsets: ${ifd.t330.join(', ')})` : 'No';
+    console.log(`IFD ${i}: ${width}x${height}, NewSubfileType: ${newSubfileType}, Photometric: ${photometric}, SubIFDs: ${hasSubIFDs}`);
+    
+    // Log all tags for debugging
+    if (import.meta.env.DEV) {
+      const tags = Object.keys(ifd).filter(k => k.startsWith('t')).sort();
+      console.log(`  Tags: ${tags.join(', ')}`);
+    }
+  }
   
-  // Find the main RAW IFD
-  const rawIFD = ifds.find((ifd: any) => !ifd.t254 || ifd.t254[0] === 0) || ifds[0];
+  // Check if any IFD has SubIFD references that weren't decoded
+  const hasSubIFDReferences = ifds.some((ifd: any) => ifd.t330);
+  if (hasSubIFDReferences && ifds.length === 1) {
+    console.warn("IFD has SubIFD references (tag 330) but UTIF only decoded 1 IFD.");
+    console.warn("UTIF.decode() should automatically decode SubIFDs, but it may not have in this case.");
+    console.warn("The main RAW image is likely in a SubIFD that wasn't decoded.");
+  }
+  
+  // Filter out previews explicitly - NewSubfileType tag 254
+  // Value 1 means it's a reduced-resolution/preview image
+  // BUT: if all IFDs are previews and we have SubIFD refs, we should still check them
+  const mainImageIFDs = ifds.filter((ifd: any) => {
+    // Exclude previews: NewSubfileType (t254) = 1 means preview
+    // This is the most reliable way to identify previews
+    if (ifd.t254 && ifd.t254[0] === 1) return false;
+    
+    return true;
+  });
+  
+  // If no main images found (all were previews), use all IFDs
+  // This ensures we always have something to work with
+  const ifdsToCheck = mainImageIFDs.length > 0 ? mainImageIFDs : ifds;
+  
+  // If we only have small previews and SubIFD refs exist, throw an error
+  if (ifdsToCheck.length > 0) {
+    const largest = ifdsToCheck.reduce((max, ifd) => {
+      const w = ifd.width || (ifd.t256 ? ifd.t256[0] : 0);
+      const h = ifd.height || (ifd.t257 ? ifd.t257[0] : 0);
+      const pixels = w * h;
+      const maxW = max.width || (max.t256 ? max.t256[0] : 0);
+      const maxH = max.height || (max.t257 ? max.t257[0] : 0);
+      const maxPixels = maxW * maxH;
+      return pixels > maxPixels ? ifd : max;
+    }, ifdsToCheck[0]);
+    
+    const largestW = largest.width || (largest.t256 ? largest.t256[0] : 0);
+    const largestH = largest.height || (largest.t257 ? largest.t257[0] : 0);
+    
+    if (largestW < 540 || largestH < 540) {
+      const errorMsg = `DNG file appears to only contain preview/thumbnail images (${largestW}x${largestH}). ` +
+        `The main RAW image (expected at least 540x540) may be stored in SubIFDs that UTIF cannot decode automatically. ` +
+        `Try converting the DNG file using Adobe DNG Converter or another tool that flattens SubIFDs to top-level IFDs.`;
+      console.error(errorMsg);
+      throw new Error(errorMsg);
+    }
+  }
+  
+  // Calculate pixel counts for all candidates first
+  const candidatesWithSizes = ifdsToCheck.map((ifd: any) => {
+    const width = ifd.width || (ifd.t256 ? ifd.t256[0] : 0);
+    const height = ifd.height || (ifd.t257 ? ifd.t257[0] : 0);
+    const pixels = width * height;
+    const isCFA = ifd.t262 && ifd.t262[0] === 32803;
+    return { ifd, width, height, pixels, isCFA };
+  });
+  
+  // Sort by pixel count (largest first), then prefer CFA
+  candidatesWithSizes.sort((a, b) => {
+    // First sort by pixel count (largest first)
+    if (b.pixels !== a.pixels) return b.pixels - a.pixels;
+    // If same size, prefer CFA
+    if (a.isCFA && !b.isCFA) return -1;
+    if (b.isCFA && !a.isCFA) return 1;
+    return 0;
+  });
+  
+  // Select the largest IFD (preferring CFA if available)
+  const selected = candidatesWithSizes[0];
+  const rawIFD = selected.ifd;
+  
+  // Log for debugging - show all candidate sizes
+  const finalWidth = rawIFD.width || rawIFD.t256?.[0];
+  const finalHeight = rawIFD.height || rawIFD.t257?.[0];
+  const allSizes = candidatesWithSizes.map(c => `${c.width}x${c.height}${c.isCFA ? ' (CFA)' : ''}`).join(', ');
+  console.log(`Selected IFD: ${finalWidth}x${finalHeight} (${selected.pixels.toLocaleString()} pixels), Total IFDs: ${ifds.length}, Main images: ${mainImageIFDs.length}`);
+  if (candidatesWithSizes.length > 1) {
+    console.log(`Available IFDs: ${allSizes}`);
+  }
   
   UTIF.decodeImage(buffer, rawIFD);
   
@@ -32,7 +122,10 @@ export async function decodeDNG(file: File): Promise<DemosaicInput> {
     // If not CFA, maybe it's already demosaiced or linear raw?
     // For this tool, we want CFA.
     // But let's proceed assuming we can extract single plane if needed.
-    console.warn("Image does not declare CFA PhotometricInterpretation");
+    // Only warn in development mode to reduce console noise
+    if (import.meta.env.DEV) {
+      console.warn("Image does not declare CFA PhotometricInterpretation");
+    }
   }
   
   // Access raw data
