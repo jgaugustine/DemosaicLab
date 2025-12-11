@@ -1,4 +1,4 @@
-import { DemosaicInput, DemosaicParams, ErrorStats, PixelTraceStep, DemosaicAlgorithm } from '@/types/demosaic';
+import { DemosaicInput, DemosaicParams, ErrorStats, DemosaicAlgorithm } from '@/types/demosaic';
 import { getBayerKernel, getXTransKernel } from './cfa';
 
 const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v * 255)));
@@ -64,11 +64,13 @@ const collectNeighbors = (
 };
 
 // Helper functions for advanced algorithms
-const logisticFunction = (x: number, threshold: number = 0.1): number => {
+const logisticFunction = (x: number, threshold: number = 0.1, steepness?: number): number => {
   // Logistic function: 1 / (1 + exp(-k*(x - threshold)))
   // k controls steepness, threshold is the edge detection threshold
-  // Make k adaptive based on threshold to ensure the function is sensitive to changes
-  const k = 20.0 / Math.max(0.01, threshold); // Higher k for lower thresholds = more sensitive
+  // If steepness is provided, use it directly; otherwise, make k adaptive based on threshold
+  const k = steepness !== undefined 
+    ? steepness 
+    : 20.0 / Math.max(0.01, threshold); // Higher k for lower thresholds = more sensitive
   return 1.0 / (1.0 + Math.exp(-k * (x - threshold)));
 };
 
@@ -314,6 +316,7 @@ export const demosaicNiuEdgeSensing = (input: DemosaicInput, params?: DemosaicPa
   const output = new ImageData(width, height);
   const getChannel = getChannelFunction(input);
   const threshold = params?.niuLogisticThreshold ?? 0.1;
+  const steepness = params?.niuLogisticSteepness;
   const val = (cx: number, cy: number) => getCfaVal(cfaData, width, height, cx, cy);
   
   // First pass: Interpolate green channel with edge awareness
@@ -328,8 +331,8 @@ export const demosaicNiuEdgeSensing = (input: DemosaicInput, params?: DemosaicPa
       } else {
         // Use edge-aware interpolation for green at R/B pixels
         const vars = computeDirectionalVariations(cfaData, width, height, x, y, getChannel);
-        const wH = logisticFunction(vars.horizontal, threshold);
-        const wV = logisticFunction(vars.vertical, threshold);
+        const wH = logisticFunction(vars.horizontal, threshold, steepness);
+        const wV = logisticFunction(vars.vertical, threshold, steepness);
         const sumW = wH + wV;
         const nH = (sumW > 0) ? (1.0 - wH / sumW) : 0.5;
         const nV = (sumW > 0) ? (1.0 - wV / sumW) : 0.5;
@@ -423,7 +426,9 @@ export const demosaicLienEdgeBased = (input: DemosaicInput): ImageData => {
       if (centerCh === 'g') {
         g = centerVal;
         
-        // Detect edge direction
+        // Detect edge direction using the immediate neighbors
+        // For Bayer at green pixel: horizontal neighbors are R or B (depending on row), vertical are opposite
+        // Use the raw differences to detect edge direction
         const diffH = Math.abs(val(x - 1, y) - val(x + 1, y));
         const diffV = Math.abs(val(x, y - 1) - val(x, y + 1));
         
@@ -432,19 +437,21 @@ export const demosaicLienEdgeBased = (input: DemosaicInput): ImageData => {
         
         if (isRedRow) {
           if (diffH < diffV) {
-            // Edge is horizontal, interpolate along horizontal
+            // Edge is horizontal, interpolate R horizontally, B vertically
             r = (val(x - 1, y) + val(x + 1, y)) / 2;
             b = (val(x, y - 1) + val(x, y + 1)) / 2;
           } else {
-            // Edge is vertical, interpolate along vertical
+            // Edge is vertical, interpolate R vertically, B horizontally
             r = (val(x, y - 1) + val(x, y + 1)) / 2;
             b = (val(x - 1, y) + val(x + 1, y)) / 2;
           }
         } else {
           if (diffH < diffV) {
+            // Edge is horizontal, interpolate B horizontally, R vertically
             r = (val(x, y - 1) + val(x, y + 1)) / 2;
             b = (val(x - 1, y) + val(x + 1, y)) / 2;
           } else {
+            // Edge is vertical, interpolate B vertically, R horizontally
             r = (val(x - 1, y) + val(x + 1, y)) / 2;
             b = (val(x, y - 1) + val(x, y + 1)) / 2;
           }
@@ -453,38 +460,52 @@ export const demosaicLienEdgeBased = (input: DemosaicInput): ImageData => {
         r = centerVal;
         
         // Edge-aware green interpolation
-        const diffH = Math.abs(val(x - 1, y) - val(x + 1, y));
-        const diffV = Math.abs(val(x, y - 1) - val(x, y + 1));
+        // For Bayer: horizontal neighbors (x-1,y) and (x+1,y) are G, vertical (x,y-1) and (x,y+1) are G
+        const gH1 = val(x - 1, y);
+        const gH2 = val(x + 1, y);
+        const gV1 = val(x, y - 1);
+        const gV2 = val(x, y + 1);
+        
+        const diffH = Math.abs(gH1 - gH2);
+        const diffV = Math.abs(gV1 - gV2);
         
         if (diffH < diffV) {
-          // Edge is horizontal, use horizontal neighbors
-          g = (val(x - 1, y) + val(x + 1, y)) / 2;
+          // Edge is horizontal, use horizontal green neighbors
+          g = (gH1 + gH2) / 2;
         } else {
-          // Edge is vertical, use vertical neighbors
-          g = (val(x, y - 1) + val(x, y + 1)) / 2;
+          // Edge is vertical, use vertical green neighbors
+          g = (gV1 + gV2) / 2;
         }
         
         // Interpolate blue via color difference
         const avgB = (val(x - 1, y - 1) + val(x + 1, y - 1) + val(x - 1, y + 1) + val(x + 1, y + 1)) / 4;
-        const avgG = (val(x - 1, y) + val(x + 1, y) + val(x, y - 1) + val(x, y + 1)) / 4;
+        const avgG = (gH1 + gH2 + gV1 + gV2) / 4;
         b = avgB + (g - avgG);
       } else {
         // Blue pixel
         b = centerVal;
         
         // Edge-aware green interpolation
-        const diffH = Math.abs(val(x - 1, y) - val(x + 1, y));
-        const diffV = Math.abs(val(x, y - 1) - val(x, y + 1));
+        // For Bayer: horizontal neighbors (x-1,y) and (x+1,y) are G, vertical (x,y-1) and (x,y+1) are G
+        const gH1 = val(x - 1, y);
+        const gH2 = val(x + 1, y);
+        const gV1 = val(x, y - 1);
+        const gV2 = val(x, y + 1);
+        
+        const diffH = Math.abs(gH1 - gH2);
+        const diffV = Math.abs(gV1 - gV2);
         
         if (diffH < diffV) {
-          g = (val(x - 1, y) + val(x + 1, y)) / 2;
+          // Edge is horizontal, use horizontal green neighbors
+          g = (gH1 + gH2) / 2;
         } else {
-          g = (val(x, y - 1) + val(x, y + 1)) / 2;
+          // Edge is vertical, use vertical green neighbors
+          g = (gV1 + gV2) / 2;
         }
         
         // Interpolate red via color difference
         const avgR = (val(x - 1, y - 1) + val(x + 1, y - 1) + val(x - 1, y + 1) + val(x + 1, y + 1)) / 4;
-        const avgG = (val(x - 1, y) + val(x + 1, y) + val(x, y - 1) + val(x, y + 1)) / 4;
+        const avgG = (gH1 + gH2 + gV1 + gV2) / 4;
         r = avgR + (g - avgG);
       }
       
@@ -807,6 +828,7 @@ export const demosaicXTransNiuEdgeSensing = (input: DemosaicInput, params?: Demo
   const output = new ImageData(width, height);
   const getChannel = getXTransKernel();
   const threshold = params?.niuLogisticThreshold ?? 0.1;
+  const steepness = params?.niuLogisticSteepness;
   
   const val = (cx: number, cy: number) => getCfaVal(cfaData, width, height, cx, cy);
   
@@ -822,24 +844,32 @@ export const demosaicXTransNiuEdgeSensing = (input: DemosaicInput, params?: Demo
       } else {
         // Use edge-aware interpolation for green
         const vars = computeDirectionalVariations(cfaData, width, height, x, y, getChannel);
-        const wH = logisticFunction(vars.horizontal, threshold);
-        const wV = logisticFunction(vars.vertical, threshold);
+        const wH = logisticFunction(vars.horizontal, threshold, steepness);
+        const wV = logisticFunction(vars.vertical, threshold, steepness);
         const sumW = wH + wV;
         const nH = (sumW > 0) ? (1.0 - wH / sumW) : 0.5;
         const nV = (sumW > 0) ? (1.0 - wV / sumW) : 0.5;
         
-        // Collect green neighbors
-        let gSum = 0, gCnt = 0;
+        // Collect green neighbors in horizontal and vertical directions separately
+        let gHSum = 0, gHCnt = 0, gVSum = 0, gVCnt = 0;
         for (let dy = -2; dy <= 2; dy++) {
           for (let dx = -2; dx <= 2; dx++) {
             if (dx === 0 && dy === 0) continue;
             if (getChannel(x + dx, y + dy) === 'g') {
-              gSum += val(x + dx, y + dy);
-              gCnt++;
+              if (dy === 0) { // Horizontal direction
+                gHSum += val(x + dx, y + dy);
+                gHCnt++;
+              }
+              if (dx === 0) { // Vertical direction
+                gVSum += val(x + dx, y + dy);
+                gVCnt++;
+              }
             }
           }
         }
-        greenInterp[y * width + x] = gCnt > 0 ? gSum / gCnt : centerVal;
+        const gH = gHCnt > 0 ? gHSum / gHCnt : centerVal;
+        const gV = gVCnt > 0 ? gVSum / gVCnt : centerVal;
+        greenInterp[y * width + x] = (gH * nH + gV * nV) / (nH + nV);
       }
     }
   }
@@ -946,19 +976,26 @@ export const demosaicXTransLienEdgeBased = (input: DemosaicInput): ImageData => 
         b = bCnt > 0 ? bSum / bCnt : 0;
       } else if (centerCh === 'r') {
         r = centerVal;
-        // Edge-aware green interpolation
-        const diffH = Math.abs(val(x - 1, y) - val(x + 1, y));
-        const diffV = Math.abs(val(x, y - 1) - val(x, y + 1));
+        // Edge-aware green interpolation: compare GREEN channel values only
+        const gH1 = getChannel(x - 1, y) === 'g' ? val(x - 1, y) : 0;
+        const gH2 = getChannel(x + 1, y) === 'g' ? val(x + 1, y) : 0;
+        const gV1 = getChannel(x, y - 1) === 'g' ? val(x, y - 1) : 0;
+        const gV2 = getChannel(x, y + 1) === 'g' ? val(x, y + 1) : 0;
+        
+        const diffH = Math.abs(gH1 - gH2);
+        const diffV = Math.abs(gV1 - gV2);
         
         let gSum = 0, gCnt = 0;
         if (diffH < diffV) {
-          if (getChannel(x - 1, y) === 'g') { gSum += val(x - 1, y); gCnt++; }
-          if (getChannel(x + 1, y) === 'g') { gSum += val(x + 1, y); gCnt++; }
+          // Edge is horizontal, use horizontal green neighbors
+          if (gH1 > 0) { gSum += gH1; gCnt++; }
+          if (gH2 > 0) { gSum += gH2; gCnt++; }
         } else {
-          if (getChannel(x, y - 1) === 'g') { gSum += val(x, y - 1); gCnt++; }
-          if (getChannel(x, y + 1) === 'g') { gSum += val(x, y + 1); gCnt++; }
+          // Edge is vertical, use vertical green neighbors
+          if (gV1 > 0) { gSum += gV1; gCnt++; }
+          if (gV2 > 0) { gSum += gV2; gCnt++; }
         }
-        g = gCnt > 0 ? gSum / gCnt : 0;
+        g = gCnt > 0 ? gSum / gCnt : ((gH1 + gH2 + gV1 + gV2) / 4);
         
         // Interpolate blue
         let bSum = 0, bCnt = 0;
@@ -973,19 +1010,26 @@ export const demosaicXTransLienEdgeBased = (input: DemosaicInput): ImageData => 
         b = bCnt > 0 ? bSum / bCnt : g;
       } else {
         b = centerVal;
-        // Edge-aware green interpolation
-        const diffH = Math.abs(val(x - 1, y) - val(x + 1, y));
-        const diffV = Math.abs(val(x, y - 1) - val(x, y + 1));
+        // Edge-aware green interpolation: compare GREEN channel values only
+        const gH1 = getChannel(x - 1, y) === 'g' ? val(x - 1, y) : 0;
+        const gH2 = getChannel(x + 1, y) === 'g' ? val(x + 1, y) : 0;
+        const gV1 = getChannel(x, y - 1) === 'g' ? val(x, y - 1) : 0;
+        const gV2 = getChannel(x, y + 1) === 'g' ? val(x, y + 1) : 0;
+        
+        const diffH = Math.abs(gH1 - gH2);
+        const diffV = Math.abs(gV1 - gV2);
         
         let gSum = 0, gCnt = 0;
         if (diffH < diffV) {
-          if (getChannel(x - 1, y) === 'g') { gSum += val(x - 1, y); gCnt++; }
-          if (getChannel(x + 1, y) === 'g') { gSum += val(x + 1, y); gCnt++; }
+          // Edge is horizontal, use horizontal green neighbors
+          if (gH1 > 0) { gSum += gH1; gCnt++; }
+          if (gH2 > 0) { gSum += gH2; gCnt++; }
         } else {
-          if (getChannel(x, y - 1) === 'g') { gSum += val(x, y - 1); gCnt++; }
-          if (getChannel(x, y + 1) === 'g') { gSum += val(x, y + 1); gCnt++; }
+          // Edge is vertical, use vertical green neighbors
+          if (gV1 > 0) { gSum += gV1; gCnt++; }
+          if (gV2 > 0) { gSum += gV2; gCnt++; }
         }
-        g = gCnt > 0 ? gSum / gCnt : 0;
+        g = gCnt > 0 ? gSum / gCnt : ((gH1 + gH2 + gV1 + gV2) / 4);
         
         // Interpolate red
         let rSum = 0, rCnt = 0;
@@ -1276,526 +1320,6 @@ export const demosaicXTransKikuResidual = (input: DemosaicInput, params?: Demosa
   }
   
   return output;
-};
-
-export const getPixelTrace = (
-  input: DemosaicInput,
-  x: number,
-  y: number,
-  algorithm: DemosaicAlgorithm
-): PixelTraceStep[] => {
-  const { width, height, cfaData, cfaPatternMeta, cfaPattern } = input;
-  const steps: PixelTraceStep[] = [];
-  
-  if (x < 0 || x >= width || y < 0 || y >= height) return steps;
-  
-  let getChannel = getBayerKernel(cfaPatternMeta.layout);
-  if (cfaPattern === 'xtrans') getChannel = getXTransKernel();
-  
-  const centerCh = getChannel(x, y);
-  const centerVal = cfaData[y * width + x];
-  const val = (cx: number, cy: number) => getCfaVal(cfaData, width, height, cx, cy);
-  
-  steps.push({
-    description: `Raw Sensor Sample (${centerCh.toUpperCase()})`,
-    formula: `I_{sensor} = ${centerCh.toUpperCase()}_{${x},${y}}`,
-    inputs: [],
-    output: centerVal
-  });
-
-  if (cfaPattern === 'bayer') {
-    // ... (Keep Bayer logic) ...
-    if (algorithm === 'nearest') {
-       let r = 0, g = 0, b = 0;
-       const inputs: {label: string, value: number}[] = [];
-       
-       if (centerCh === 'r') {
-          r = centerVal;
-          const gVal = val(x+1, y);
-          const bVal = val(x+1, y+1);
-          g = gVal; b = bVal;
-          inputs.push({ label: "G(x+1,y)", value: gVal });
-          inputs.push({ label: "B(x+1,y+1)", value: bVal });
-       } else if (centerCh === 'b') {
-          b = centerVal;
-          const gVal = val(x-1, y);
-          const rVal = val(x-1, y-1);
-          g = gVal; r = rVal;
-          inputs.push({ label: "G(x-1,y)", value: gVal });
-          inputs.push({ label: "R(x-1,y-1)", value: rVal });
-       } else {
-          g = centerVal;
-          const leftCh = getBayerKernel(cfaPatternMeta.layout)(Math.max(0, x-1), y);
-          if (leftCh === 'r' || getBayerKernel(cfaPatternMeta.layout)(Math.min(width-1, x+1), y) === 'r') {
-               const rVal = val(x+1, y);
-               const bVal = val(x, y+1);
-               r = rVal; b = bVal;
-               inputs.push({ label: "R(x+1,y)", value: rVal });
-               inputs.push({ label: "B(x,y+1)", value: bVal });
-          } else {
-               const bVal = val(x+1, y);
-               const rVal = val(x, y+1);
-               b = bVal; r = rVal;
-               inputs.push({ label: "B(x+1,y)", value: bVal });
-               inputs.push({ label: "R(x,y+1)", value: rVal });
-          }
-       }
-       steps.push({ description: "Nearest Neighbor Copy", formula: "\\hat{C} = C_{nearest}", inputs, output: {r,g,b} });
-
-    } else if (algorithm === 'bilinear') {
-       let r = 0, g = 0, b = 0;
-       
-       if (centerCh === 'g') {
-          g = centerVal;
-          const leftCh = getChannel(Math.max(0, x-1), y);
-          const isRedRow = (leftCh === 'r' || getChannel(Math.min(width-1, x+1), y) === 'r');
-          if (isRedRow) {
-             const r1 = val(x-1, y), r2 = val(x+1, y);
-             const b1 = val(x, y-1), b2 = val(x, y+1);
-             r = (r1+r2)/2; b = (b1+b2)/2;
-             steps.push({ description: "Interp Red (Horizontal)", formula: "\\hat{R} = \\frac{R_{x-1} + R_{x+1}}{2}", inputs: [{label:"R_l", value:r1},{label:"R_r",value:r2}], output: r });
-             steps.push({ description: "Interp Blue (Vertical)", formula: "\\hat{B} = \\frac{B_{y-1} + B_{y+1}}{2}", inputs: [{label:"B_u", value:b1},{label:"B_d",value:b2}], output: b });
-          } else {
-             const r1 = val(x, y-1), r2 = val(x, y+1);
-             const b1 = val(x-1, y), b2 = val(x+1, y);
-             r = (r1+r2)/2; b = (b1+b2)/2;
-             steps.push({ description: "Interp Red (Vertical)", formula: "\\hat{R} = \\frac{R_{y-1} + R_{y+1}}{2}", inputs: [{label:"R_u", value:r1},{label:"R_d",value:r2}], output: r });
-             steps.push({ description: "Interp Blue (Horizontal)", formula: "\\hat{B} = \\frac{B_{x-1} + B_{x+1}}{2}", inputs: [{label:"B_l", value:b1},{label:"B_r",value:b2}], output: b });
-          }
-       } else if (centerCh === 'r') {
-          r = centerVal;
-          const g1 = val(x-1, y), g2 = val(x+1, y), g3 = val(x, y-1), g4 = val(x, y+1);
-          g = (g1+g2+g3+g4)/4;
-          steps.push({ description: "Interp Green (Cross)", formula: "\\hat{G} = \\frac{1}{4} \\sum_{i \\in \\mathcal{N}_4} G_i", inputs: [{label:"G_l", value:g1}, {label:"G_r", value:g2}, {label:"G_u", value:g3}, {label:"G_d", value:g4}], output: g });
-          const b1 = val(x-1, y-1), b2 = val(x+1, y-1), b3 = val(x-1, y+1), b4 = val(x+1, y+1);
-          b = (b1+b2+b3+b4)/4;
-          steps.push({ description: "Interp Blue (Corners)", formula: "\\hat{B} = \\frac{1}{4} \\sum_{j \\in \\mathcal{Corners}} B_j", inputs: [{label:"B_nw", value:b1}, {label:"B_ne", value:b2}, {label:"B_sw", value:b3}, {label:"B_se", value:b4}], output: b });
-       } else {
-          b = centerVal;
-          const g1 = val(x-1, y), g2 = val(x+1, y), g3 = val(x, y-1), g4 = val(x, y+1);
-          g = (g1+g2+g3+g4)/4;
-          steps.push({ description: "Interp Green (Cross)", formula: "\\hat{G} = \\frac{1}{4} \\sum_{i \\in \\mathcal{N}_4} G_i", inputs: [{label:"G_l", value:g1}, {label:"G_r", value:g2}, {label:"G_u", value:g3}, {label:"G_d", value:g4}], output: g });
-          const r1 = val(x-1, y-1), r2 = val(x+1, y-1), r3 = val(x-1, y+1), r4 = val(x+1, y+1);
-          r = (r1+r2+r3+r4)/4;
-          steps.push({ description: "Interp Red (Corners)", formula: "\\hat{R} = \\frac{1}{4} \\sum_{j \\in \\mathcal{Corners}} R_j", inputs: [{label:"R_nw", value:r1}, {label:"R_ne", value:r2}, {label:"R_sw", value:r3}, {label:"R_se", value:r4}], output: r });
-       }
-       steps.push({ description: "Combine Channels", inputs: [], output: {r,g,b} });
-    } else if (algorithm === 'niu_edge_sensing') {
-       // Niu et al. edge sensing trace
-       let r = 0, g = 0, b = 0;
-       
-       if (centerCh === 'g') {
-          g = centerVal;
-          const leftCh = getChannel(Math.max(0, x-1), y);
-          if (leftCh === 'r' || getChannel(Math.min(width-1, x+1), y) === 'r') {
-             r = (val(x-1, y) + val(x+1, y)) / 2;
-             b = (val(x, y-1) + val(x, y+1)) / 2;
-          } else {
-             r = (val(x, y-1) + val(x, y+1)) / 2;
-             b = (val(x-1, y) + val(x+1, y)) / 2;
-          }
-          steps.push({ description: "Green at G pixel", formula: "G = I_{sensor}", inputs: [], output: g });
-          steps.push({ description: "Interpolate R/B", inputs: [], output: {r,g,b} });
-       } else {
-          const vars = computeDirectionalVariations(cfaData, width, height, x, y, getChannel);
-          const threshold = 0.1;
-          const wH = logisticFunction(vars.horizontal, threshold);
-          const wV = logisticFunction(vars.vertical, threshold);
-          
-          steps.push({ 
-            description: "Compute Directional Variations", 
-            formula: "\\Delta_H = |I_{x+1} - I_{x-1}|, \\Delta_V = |I_{y+1} - I_{y-1}|",
-            inputs: [
-              {label: "Horizontal", value: vars.horizontal},
-              {label: "Vertical", value: vars.vertical}
-            ],
-            output: vars.horizontal + vars.vertical
-          });
-          
-          steps.push({
-            description: "Apply Logistic Function",
-            formula: "w = \\frac{1}{1 + e^{-k(\\Delta - \\theta)}}",
-            inputs: [
-              {label: "w_H", value: wH},
-              {label: "w_V", value: wV}
-            ],
-            output: (wH + wV) / 2
-          });
-          
-          if (centerCh === 'r') {
-             r = centerVal;
-             const gH = (val(x-1, y) + val(x+1, y)) / 2;
-             const gV = (val(x, y-1) + val(x, y+1)) / 2;
-             const sumW = wH + wV;
-             const nH = sumW > 0 ? (1.0 - wH / sumW) : 0.5;
-             const nV = sumW > 0 ? (1.0 - wV / sumW) : 0.5;
-             g = (gH * nH + gV * nV) / (nH + nV);
-             
-             steps.push({
-               description: "Edge-Aware Green Interpolation",
-               formula: "\\hat{G} = \\frac{G_H w_H + G_V w_V}{w_H + w_V}",
-               inputs: [
-                 {label: "G_H", value: gH},
-                 {label: "G_V", value: gV},
-                 {label: "w_H", value: nH},
-                 {label: "w_V", value: nV}
-               ],
-               output: g
-             });
-             
-             const bMinusG = [
-               val(x-1, y-1) - g,
-               val(x+1, y-1) - g,
-               val(x-1, y+1) - g,
-               val(x+1, y+1) - g
-             ];
-             const avgBMinusG = bMinusG.reduce((a, b) => a + b, 0) / bMinusG.length;
-             b = g + avgBMinusG;
-             
-             steps.push({
-               description: "Interpolate Blue via Color Difference",
-               formula: "\\hat{B} = \\hat{G} + \\overline{(B-G)}",
-               inputs: [
-                 {label: "B-G avg", value: avgBMinusG}
-               ],
-               output: b
-             });
-          } else {
-             b = centerVal;
-             const gH = (val(x-1, y) + val(x+1, y)) / 2;
-             const gV = (val(x, y-1) + val(x, y+1)) / 2;
-             const sumW = wH + wV;
-             const nH = sumW > 0 ? (1.0 - wH / sumW) : 0.5;
-             const nV = sumW > 0 ? (1.0 - wV / sumW) : 0.5;
-             g = (gH * nH + gV * nV) / (nH + nV);
-             
-             steps.push({
-               description: "Edge-Aware Green Interpolation",
-               formula: "\\hat{G} = \\frac{G_H w_H + G_V w_V}{w_H + w_V}",
-               inputs: [
-                 {label: "G_H", value: gH},
-                 {label: "G_V", value: gV}
-               ],
-               output: g
-             });
-             
-             const rMinusG = [
-               val(x-1, y-1) - g,
-               val(x+1, y-1) - g,
-               val(x-1, y+1) - g,
-               val(x+1, y+1) - g
-             ];
-             const avgRMinusG = rMinusG.reduce((a, b) => a + b, 0) / rMinusG.length;
-             r = g + avgRMinusG;
-             
-             steps.push({
-               description: "Interpolate Red via Color Difference",
-               formula: "\\hat{R} = \\hat{G} + \\overline{(R-G)}",
-               inputs: [
-                 {label: "R-G avg", value: avgRMinusG}
-               ],
-               output: r
-             });
-          }
-          steps.push({ description: "Combine Channels", inputs: [], output: {r,g,b} });
-       }
-    } else if (algorithm === 'lien_edge_based') {
-       // Lien et al. edge-based trace
-       let r = 0, g = 0, b = 0;
-       
-       if (centerCh === 'g') {
-          g = centerVal;
-          const diffH = Math.abs(val(x-1, y) - val(x+1, y));
-          const diffV = Math.abs(val(x, y-1) - val(x, y+1));
-          
-          steps.push({
-            description: "Detect Edge Direction",
-            formula: "\\Delta_H = |I_{x-1} - I_{x+1}|, \\Delta_V = |I_{y-1} - I_{y+1}|",
-            inputs: [
-              {label: "Horizontal diff", value: diffH},
-              {label: "Vertical diff", value: diffV}
-            ],
-            output: diffH < diffV ? 'horizontal' : 'vertical'
-          });
-          
-          const leftCh = getChannel(Math.max(0, x-1), y);
-          if (leftCh === 'r' || getChannel(Math.min(width-1, x+1), y) === 'r') {
-             if (diffH < diffV) {
-                r = (val(x-1, y) + val(x+1, y)) / 2;
-                b = (val(x, y-1) + val(x, y+1)) / 2;
-             } else {
-                r = (val(x, y-1) + val(x, y+1)) / 2;
-                b = (val(x-1, y) + val(x+1, y)) / 2;
-             }
-          } else {
-             if (diffH < diffV) {
-                r = (val(x, y-1) + val(x, y+1)) / 2;
-                b = (val(x-1, y) + val(x+1, y)) / 2;
-             } else {
-                r = (val(x-1, y) + val(x+1, y)) / 2;
-                b = (val(x, y-1) + val(x, y+1)) / 2;
-             }
-          }
-          steps.push({ description: "Edge-Guided Interpolation", inputs: [], output: {r,g,b} });
-       } else if (centerCh === 'r') {
-          r = centerVal;
-          const diffH = Math.abs(val(x-1, y) - val(x+1, y));
-          const diffV = Math.abs(val(x, y-1) - val(x, y+1));
-          
-          if (diffH < diffV) {
-             g = (val(x-1, y) + val(x+1, y)) / 2;
-          } else {
-             g = (val(x, y-1) + val(x, y+1)) / 2;
-          }
-          
-          steps.push({
-            description: "Edge-Aware Green Interpolation",
-            formula: diffH < diffV ? "\\hat{G} = \\frac{G_{x-1} + G_{x+1}}{2}" : "\\hat{G} = \\frac{G_{y-1} + G_{y+1}}{2}",
-            inputs: [],
-            output: g
-          });
-          
-          const avgB = (val(x-1, y-1) + val(x+1, y-1) + val(x-1, y+1) + val(x+1, y+1)) / 4;
-          const avgG = (val(x-1, y) + val(x+1, y) + val(x, y-1) + val(x, y+1)) / 4;
-          b = avgB + (g - avgG);
-          
-          steps.push({
-            description: "Interpolate Blue via Color Difference",
-            formula: "\\hat{B} = \\bar{B} + (\\hat{G} - \\bar{G})",
-            inputs: [],
-            output: b
-          });
-          steps.push({ description: "Combine Channels", inputs: [], output: {r,g,b} });
-       } else {
-          b = centerVal;
-          const diffH = Math.abs(val(x-1, y) - val(x+1, y));
-          const diffV = Math.abs(val(x, y-1) - val(x, y+1));
-          
-          if (diffH < diffV) {
-             g = (val(x-1, y) + val(x+1, y)) / 2;
-          } else {
-             g = (val(x, y-1) + val(x, y+1)) / 2;
-          }
-          
-          steps.push({
-            description: "Edge-Aware Green Interpolation",
-            formula: diffH < diffV ? "\\hat{G} = \\frac{G_{x-1} + G_{x+1}}{2}" : "\\hat{G} = \\frac{G_{y-1} + G_{y+1}}{2}",
-            inputs: [],
-            output: g
-          });
-          
-          const avgR = (val(x-1, y-1) + val(x+1, y-1) + val(x-1, y+1) + val(x+1, y+1)) / 4;
-          const avgG = (val(x-1, y) + val(x+1, y) + val(x, y-1) + val(x, y+1)) / 4;
-          r = avgR + (g - avgG);
-          
-          steps.push({
-            description: "Interpolate Red via Color Difference",
-            formula: "\\hat{R} = \\bar{R} + (\\hat{G} - \\bar{G})",
-            inputs: [],
-            output: r
-          });
-          steps.push({ description: "Combine Channels", inputs: [], output: {r,g,b} });
-       }
-    } else if (algorithm === 'wu_polynomial') {
-       // Wu et al. polynomial interpolation trace
-       let r = 0, g = 0, b = 0;
-       
-       if (centerCh === 'g') {
-          g = centerVal;
-          const leftCh = getChannel(Math.max(0, x-1), y);
-          if (leftCh === 'r' || getChannel(Math.min(width-1, x+1), y) === 'r') {
-             r = (val(x-1, y) + val(x+1, y)) / 2;
-             b = (val(x, y-1) + val(x, y+1)) / 2;
-          } else {
-             r = (val(x, y-1) + val(x, y+1)) / 2;
-             b = (val(x-1, y) + val(x+1, y)) / 2;
-          }
-          steps.push({
-            description: "Polynomial Interpolation for R/B",
-            formula: "\\hat{C} = P_2(\\mathcal{N})",
-            inputs: [],
-            output: {r,g,b}
-          });
-       } else if (centerCh === 'r') {
-          r = centerVal;
-          const neighbors = [val(x-1, y), val(x+1, y), val(x, y-1), val(x, y+1)];
-          g = neighbors.reduce((a, b) => a + b, 0) / neighbors.length;
-          
-          steps.push({
-            description: "Polynomial Green Interpolation",
-            formula: "\\hat{G} = P_2(G_{neighbors})",
-            inputs: neighbors.map((v, i) => ({label: `G_${i}`, value: v})),
-            output: g
-          });
-          
-          const colorDiffH = Math.abs(val(x-1, y) - val(x+1, y));
-          const colorDiffV = Math.abs(val(x, y-1) - val(x, y+1));
-          
-          steps.push({
-            description: "Edge Classification",
-            formula: "\\text{edge} = \\arg\\min(\\Delta_H, \\Delta_V)",
-            inputs: [
-              {label: "Horizontal", value: colorDiffH},
-              {label: "Vertical", value: colorDiffV}
-            ],
-            output: colorDiffH < colorDiffV ? 'horizontal' : 'vertical'
-          });
-          
-          const bVals = [val(x-1, y-1), val(x+1, y-1), val(x-1, y+1), val(x+1, y+1)];
-          const avgBMinusG = bVals.map(bv => bv - g).reduce((a, b) => a + b, 0) / bVals.length;
-          b = g + avgBMinusG;
-          
-          steps.push({
-            description: "Refined Blue via Color Difference",
-            formula: "\\hat{B} = \\hat{G} + \\overline{(B-G)}",
-            inputs: [
-              {label: "B-G avg", value: avgBMinusG}
-            ],
-            output: b
-          });
-          steps.push({ description: "Combine Channels", inputs: [], output: {r,g,b} });
-       } else {
-          b = centerVal;
-          const neighbors = [val(x-1, y), val(x+1, y), val(x, y-1), val(x, y+1)];
-          g = neighbors.reduce((a, b) => a + b, 0) / neighbors.length;
-          
-          steps.push({
-            description: "Polynomial Green Interpolation",
-            formula: "\\hat{G} = P_2(G_{neighbors})",
-            inputs: neighbors.map((v, i) => ({label: `G_${i}`, value: v})),
-            output: g
-          });
-          
-          const rVals = [val(x-1, y-1), val(x+1, y-1), val(x-1, y+1), val(x+1, y+1)];
-          const avgRMinusG = rVals.map(rv => rv - g).reduce((a, b) => a + b, 0) / rVals.length;
-          r = g + avgRMinusG;
-          
-          steps.push({
-            description: "Refined Red via Color Difference",
-            formula: "\\hat{R} = \\hat{G} + \\overline{(R-G)}",
-            inputs: [
-              {label: "R-G avg", value: avgRMinusG}
-            ],
-            output: r
-          });
-          steps.push({ description: "Combine Channels", inputs: [], output: {r,g,b} });
-       }
-    } else if (algorithm === 'kiku_residual') {
-       // Kiku et al. residual interpolation trace
-       steps.push({
-         description: "Initial Bilinear Estimation",
-         formula: "\\hat{I}_0 = \\text{Bilinear}(M)",
-         inputs: [],
-         output: "Initial estimate"
-       });
-       
-       let r = 0, g = 0, b = 0;
-       
-       if (centerCh === 'r') {
-          r = centerVal;
-          const initialG = (val(x-1, y) + val(x+1, y) + val(x, y-1) + val(x, y+1)) / 4;
-          // For R pixel, we need to estimate initial G, then compute residual
-          const initialR = centerVal;
-          const residualR = 0; // Observed - initial = centerVal - centerVal = 0
-          
-          steps.push({
-            description: "Initial Green Estimate",
-            formula: "\\hat{G}_0 = \\frac{1}{4}\\sum G_{neighbors}",
-            inputs: [
-              {label: "G neighbors", value: initialG}
-            ],
-            output: initialG
-          });
-          
-          // Interpolate green residual from neighboring green pixels
-          const residualGInterp = (
-            (val(x-1, y) - initialG) +
-            (val(x+1, y) - initialG) +
-            (val(x, y-1) - initialG) +
-            (val(x, y+1) - initialG)
-          ) / 4;
-          g = initialG + residualGInterp;
-          
-          steps.push({
-            description: "Interpolate Residual",
-            formula: "\\hat{R}_{interp} = \\text{Interp}(R_{neighbors})",
-            inputs: [],
-            output: residualGInterp
-          });
-          
-          steps.push({
-            description: "Refined Estimate",
-            formula: "\\hat{G} = \\hat{G}_0 + \\hat{R}_{interp}",
-            inputs: [
-              {label: "Initial", value: initialG},
-              {label: "Residual", value: residualGInterp}
-            ],
-            output: g
-          });
-          
-          const bMinusG = [
-            val(x-1, y-1) - g,
-            val(x+1, y-1) - g,
-            val(x-1, y+1) - g,
-            val(x+1, y+1) - g
-          ];
-          b = g + bMinusG.reduce((a, b) => a + b, 0) / bMinusG.length;
-          steps.push({ description: "Interpolate Blue", inputs: [], output: b });
-          steps.push({ description: "Combine Channels", inputs: [], output: {r,g,b} });
-       } else if (centerCh === 'g') {
-          g = centerVal;
-          const leftCh = getChannel(Math.max(0, x-1), y);
-          if (leftCh === 'r' || getChannel(Math.min(width-1, x+1), y) === 'r') {
-             r = (val(x-1, y) + val(x+1, y)) / 2;
-             b = (val(x, y-1) + val(x, y+1)) / 2;
-          } else {
-             r = (val(x, y-1) + val(x, y+1)) / 2;
-             b = (val(x-1, y) + val(x+1, y)) / 2;
-          }
-          steps.push({ description: "Green at G pixel", inputs: [], output: {r,g,b} });
-       } else {
-          b = centerVal;
-          const initialG = (val(x-1, y) + val(x+1, y) + val(x, y-1) + val(x, y+1)) / 4;
-          const residualGInterp = (
-            (val(x-1, y) - initialG) +
-            (val(x+1, y) - initialG) +
-            (val(x, y-1) - initialG) +
-            (val(x, y+1) - initialG)
-          ) / 4;
-          g = initialG + residualGInterp;
-          
-          steps.push({
-            description: "Residual Interpolation for Green",
-            formula: "\\hat{G} = \\hat{G}_0 + \\text{Interp}(R_G)",
-            inputs: [],
-            output: g
-          });
-          
-          const rMinusG = [
-            val(x-1, y-1) - g,
-            val(x+1, y-1) - g,
-            val(x-1, y+1) - g,
-            val(x+1, y+1) - g
-          ];
-          r = g + rMinusG.reduce((a, b) => a + b, 0) / rMinusG.length;
-          steps.push({ description: "Interpolate Red", inputs: [], output: r });
-          steps.push({ description: "Combine Channels", inputs: [], output: {r,g,b} });
-       }
-    }
-  } else if (cfaPattern === 'xtrans') {
-    // XTrans Trace
-    steps.push({
-       description: "X-Trans Interpolation",
-       formula: "\\hat{C} = \\text{AdaptiveAvg}(\\mathcal{N}_{5 \\times 5})",
-       inputs: [],
-       output: {
-         r: 0, g: 0, b: 0 // Placeholder for now, logic mirrors demosaicXTransBasic
-       } 
-    });
-    // Todo: Fill in detailed X-Trans steps similar to Bayer
-  }
-  
-  return steps;
 };
 
 // ... computeErrorStats ...

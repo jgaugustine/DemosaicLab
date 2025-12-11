@@ -9,7 +9,7 @@ import { Separator } from '@/components/ui/separator';
 import { DemosaicCanvas } from '@/components/DemosaicCanvas';
 import { DemosaicMathExplanation } from '@/components/DemosaicMathExplanation';
 import { BenchmarkMode } from '@/components/BenchmarkMode';
-import { DemosaicInput, DemosaicAlgorithm, CFAType, PixelTraceStep, ErrorStats, DemosaicParams } from '@/types/demosaic';
+import { DemosaicInput, DemosaicAlgorithm, CFAType, ErrorStats, DemosaicParams } from '@/types/demosaic';
 import { simulateCFA } from '@/lib/cfa';
 import { 
   demosaicNearest,
@@ -18,12 +18,11 @@ import {
   demosaicLienEdgeBased,
   demosaicWuPolynomial,
   demosaicKikuResidual,
-  computeErrorStats, 
-  getPixelTrace 
+  computeErrorStats
 } from '@/lib/demosaic';
 import { decodeDNG } from '@/lib/dngDecode';
 import { createZonePlate, createFineCheckerboard, createColorSweep, createStarburst, createDiagonalLines, createSineWaveGratings, createColorPatches, createColorFringes } from '@/lib/synthetic';
-import { Upload, Image as ImageIcon, FileCode, Grid3X3, ZoomIn, ZoomOut, RefreshCcw, Grid, Columns } from 'lucide-react';
+import { Upload, Image as ImageIcon, FileCode, Grid3X3, ZoomIn, ZoomOut, RefreshCcw, Grid, Columns, Loader2 } from 'lucide-react';
 import { downsizeImageToDataURL } from '@/lib/imageResize';
 import { HelpTooltip } from '@/components/ui/HelpTooltip';
 
@@ -66,8 +65,8 @@ export default function Index() {
   // Algo 1 State
   const [outputImage, setOutputImage] = useState<ImageData | null>(null);
   const [algorithm, setAlgorithm] = useState<DemosaicAlgorithm>('bilinear');
-  const [trace, setTrace] = useState<PixelTraceStep[]>([]);
   const [errorStats, setErrorStats] = useState<ErrorStats | null>(null);
+  const [isProcessing1, setIsProcessing1] = useState(false);
   const [params, setParams] = useState<DemosaicParams>({
     niuLogisticThreshold: 0.1,
     wuPolynomialDegree: 2,
@@ -76,8 +75,8 @@ export default function Index() {
   // Algo 2 State
   const [outputImage2, setOutputImage2] = useState<ImageData | null>(null);
   const [algorithm2, setAlgorithm2] = useState<DemosaicAlgorithm>('nearest');
-  const [trace2, setTrace2] = useState<PixelTraceStep[]>([]);
   const [errorStats2, setErrorStats2] = useState<ErrorStats | null>(null);
+  const [isProcessing2, setIsProcessing2] = useState(false);
   const [params2, setParams2] = useState<DemosaicParams>({
     niuLogisticThreshold: 0.1,
     wuPolynomialDegree: 2,
@@ -92,6 +91,12 @@ export default function Index() {
   const [viewMode, setViewMode] = useState<'original' | 'cfa' | 'reconstruction'>('reconstruction');
   const [zoom, setZoom] = useState(1);
   const [isFit, setIsFit] = useState(true);
+  
+  // Cache for reconstruction results
+  // Key format: `${inputId}-${algorithm}-${cfaType}-${paramsHash}`
+  // Value: { image: ImageData, errorStats: ErrorStats | null }
+  const reconstructionCacheRef = useRef<Map<string, { image: ImageData; errorStats: ErrorStats | null }>>(new Map());
+  const inputIdRef = useRef<number>(0);
   
   const fileInputRefLab = useRef<HTMLInputElement>(null);
   const fileInputRefRaw = useRef<HTMLInputElement>(null);
@@ -618,6 +623,10 @@ export default function Index() {
 
     const displayImage = getDisplayImage(config);
     const label = getViewportLabel(config);
+    // Determine if this viewport should show loading
+    const isLoading = config.viewType === 'reconstruction' 
+      ? (config.useAlgorithm2 ? isProcessing2 : isProcessing1)
+      : false;
     
     // Callback ref to set up native wheel event listener (avoids passive listener issues)
     const setViewportRef = (element: HTMLDivElement | null) => {
@@ -678,6 +687,12 @@ export default function Index() {
                   <div className="absolute top-2 left-2 bg-background/80 backdrop-blur px-2 py-1 rounded text-[10px] font-mono border border-border z-10 pointer-events-none">
                     {label}
                   </div>
+                  {isLoading && (
+                    <div className="absolute bottom-2 left-2 bg-background/80 backdrop-blur px-2 py-1 rounded text-[10px] font-mono border border-border z-10 pointer-events-none flex items-center gap-2">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      <span>Processing...</span>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="text-center space-y-4 z-10">
@@ -827,6 +842,32 @@ export default function Index() {
     return img;
   }, []);
 
+  // Update input ID when input changes (to invalidate cache)
+  // We use a ref to track the previous input to detect actual changes
+  const prevInputRef = useRef<DemosaicInput | null>(null);
+  useEffect(() => {
+    if (!input) {
+      prevInputRef.current = null;
+      return;
+    }
+    
+    const prevInput = prevInputRef.current;
+    // Check if input actually changed by comparing key properties
+    const inputChanged = !prevInput || 
+      prevInput.width !== input.width ||
+      prevInput.height !== input.height ||
+      prevInput.mode !== input.mode ||
+      prevInput.cfaPattern !== input.cfaPattern ||
+      prevInput.cfaData !== input.cfaData; // Reference comparison for CFA data
+    
+    if (inputChanged) {
+      inputIdRef.current += 1;
+      // Clear cache when input changes
+      reconstructionCacheRef.current.clear();
+      prevInputRef.current = input;
+    }
+  }, [input]);
+
   // Generate CFA Visualization Images for all patterns
   useEffect(() => {
     if (!input) {
@@ -834,6 +875,9 @@ export default function Index() {
       setCfaImages({ bayer: null, xtrans: null, foveon: null });
       return;
     }
+    
+    // Check if we already have CFA images cached for this input
+    // We'll regenerate only if the input actually changed (handled by the dependency on input)
 
     // For raw mode, we only have the input's CFA pattern
     if (input.mode === 'raw') {
@@ -880,7 +924,20 @@ export default function Index() {
     }
   }, [input, generateCFAVisualization]);
 
-  // Helper to run demosaic
+  // Helper to create a cache key for reconstruction results
+  const createCacheKey = useCallback((
+    inputId: number,
+    algo: DemosaicAlgorithm,
+    cfa: CFAType,
+    algoParams?: DemosaicParams
+  ): string => {
+    const paramsStr = algoParams 
+      ? `${algoParams.niuLogisticThreshold}-${algoParams.wuPolynomialDegree}`
+      : 'default';
+    return `${inputId}-${algo}-${cfa}-${paramsStr}`;
+  }, []);
+
+  // Helper to run demosaic with caching
   const runDemosaic = useCallback((inp: DemosaicInput, algo: DemosaicAlgorithm, algoParams?: DemosaicParams) => {
     if (algo === 'nearest') return demosaicNearest(inp);
     if (algo === 'bilinear') return demosaicBilinear(inp);
@@ -891,32 +948,95 @@ export default function Index() {
     return new ImageData(inp.width, inp.height);
   }, []);
 
+  // Helper to get or compute reconstruction result with caching
+  const getOrComputeReconstruction = useCallback((
+    inp: DemosaicInput,
+    algo: DemosaicAlgorithm,
+    cfa: CFAType,
+    algoParams?: DemosaicParams
+  ): { image: ImageData; errorStats: ErrorStats | null } => {
+    const cacheKey = createCacheKey(inputIdRef.current, algo, cfa, algoParams);
+    const cached = reconstructionCacheRef.current.get(cacheKey);
+    
+    if (cached) {
+      return cached;
+    }
+    
+    // Compute new result
+    const image = runDemosaic(inp, algo, algoParams);
+    let errorStats: ErrorStats | null = null;
+    if ((inp.mode === 'lab' || inp.mode === 'synthetic') && inp.groundTruthRGB) {
+      errorStats = computeErrorStats(inp.groundTruthRGB, image);
+    }
+    
+    const result = { image, errorStats };
+    reconstructionCacheRef.current.set(cacheKey, result);
+    return result;
+  }, [createCacheKey, runDemosaic]);
+
   // Pipeline 1
   useEffect(() => {
     if (!input) return;
-    const result = runDemosaic(input, algorithm, params);
-    setOutputImage(result);
-    if ((input.mode === 'lab' || input.mode === 'synthetic') && input.groundTruthRGB) {
-      setErrorStats(computeErrorStats(input.groundTruthRGB, result));
-    } else {
-      setErrorStats(null);
+    
+    // Check cache first
+    const cacheKey = createCacheKey(inputIdRef.current, algorithm, cfaType, params);
+    const cached = reconstructionCacheRef.current.get(cacheKey);
+    
+    if (cached) {
+      // Use cached result
+      setOutputImage(cached.image);
+      setErrorStats(cached.errorStats);
+      setIsProcessing1(false);
+      return;
     }
-  }, [input, algorithm, cfaType, params, runDemosaic]);
+    
+    // Not in cache, compute it
+    setIsProcessing1(true);
+    // Use requestAnimationFrame to allow UI to update before heavy computation
+    requestAnimationFrame(() => {
+      // Use another frame to ensure the loading state renders
+      requestAnimationFrame(() => {
+        const result = getOrComputeReconstruction(input, algorithm, cfaType, params);
+        setOutputImage(result.image);
+        setErrorStats(result.errorStats);
+        setIsProcessing1(false);
+      });
+    });
+  }, [input, algorithm, cfaType, params, createCacheKey, getOrComputeReconstruction]);
 
   // Pipeline 2 (Comparison)
   useEffect(() => {
     if (!input || !comparisonMode) {
         setOutputImage2(null);
+        setIsProcessing2(false);
         return;
     }
-    const result = runDemosaic(input, algorithm2, params2);
-    setOutputImage2(result);
-    if ((input.mode === 'lab' || input.mode === 'synthetic') && input.groundTruthRGB) {
-      setErrorStats2(computeErrorStats(input.groundTruthRGB, result));
-    } else {
-      setErrorStats2(null);
+    
+    // Check cache first
+    const cacheKey = createCacheKey(inputIdRef.current, algorithm2, cfaType, params2);
+    const cached = reconstructionCacheRef.current.get(cacheKey);
+    
+    if (cached) {
+      // Use cached result
+      setOutputImage2(cached.image);
+      setErrorStats2(cached.errorStats);
+      setIsProcessing2(false);
+      return;
     }
-  }, [input, algorithm2, cfaType, comparisonMode, params2, runDemosaic]);
+    
+    // Not in cache, compute it
+    setIsProcessing2(true);
+    // Use requestAnimationFrame to allow UI to update before heavy computation
+    requestAnimationFrame(() => {
+      // Use another frame to ensure the loading state renders
+      requestAnimationFrame(() => {
+        const result = getOrComputeReconstruction(input, algorithm2, cfaType, params2);
+        setOutputImage2(result.image);
+        setErrorStats2(result.errorStats);
+        setIsProcessing2(false);
+      });
+    });
+  }, [input, algorithm2, cfaType, comparisonMode, params2, createCacheKey, getOrComputeReconstruction]);
 
   // Initialize viewport configs when comparison mode or layout changes
   useEffect(() => {
@@ -945,24 +1065,6 @@ export default function Index() {
       }
     }
   }, [comparisonMode, comparisonPreset, comparisonLayout, hasGroundTruth, getPresetConfigs]);
-
-  // Trace effect
-  useEffect(() => {
-    if (!selectedPos || !input) {
-      setTrace([]);
-      setTrace2([]);
-      return;
-    }
-    const { x, y } = selectedPos;
-    
-    setTrace(getPixelTrace(input, x, y, algorithm));
-    
-    if (comparisonMode) {
-        setTrace2(getPixelTrace(input, x, y, algorithm2));
-    } else {
-        setTrace2([]);
-    }
-  }, [selectedPos, input, algorithm, algorithm2, comparisonMode]);
 
   // Reset view mode when input changes or when ground truth becomes unavailable
   useEffect(() => {
@@ -1000,22 +1102,6 @@ export default function Index() {
           
           {/* Left Panel: Controls */}
           <div className="lg:col-span-3 flex flex-col gap-4 h-full overflow-y-auto pr-2 min-w-0">
-            {/* Benchmark Mode Toggle */}
-            <Card className="bg-card border-border">
-              <CardHeader className="pb-3">
-                <h2 className="text-lg font-semibold text-primary">Tools</h2>
-              </CardHeader>
-              <CardContent>
-                <Button 
-                  variant="outline" 
-                  className="w-full"
-                  onClick={() => setBenchmarkMode(true)}
-                >
-                  Enter Benchmark Mode
-                </Button>
-              </CardContent>
-            </Card>
-
             {/* 1. Mode Selection */}
             <Card className="bg-card border-border">
               <CardHeader className="pb-3">
@@ -1023,8 +1109,8 @@ export default function Index() {
                   Mode
                   <HelpTooltip className="h-3 w-3" content="
                     Synthetic: Mathematical patterns to test algorithms.
+                    JPEG Lab: Standard images (JPG/PNG) treated as ground truth to simulate sensor sampling.
                     Real Raw: Actual sensor data from DNG files.
-                    Lab: Standard images (JPG/PNG) treated as ground truth to simulate sensor sampling.
                   " />
                 </h2>
               </CardHeader>
@@ -1037,18 +1123,26 @@ export default function Index() {
                       setUiMode(v);
                     }
                   }}
+                  variant="outline"
                   className="w-full"
                 >
-                  <ToggleGroupItem value="synthetic" aria-label="Synthetic mode" className="flex-1 text-xs">
+                  <ToggleGroupItem value="synthetic" aria-label="Synthetic mode" className="flex-1 text-xs bg-background">
                     Synthetic
                   </ToggleGroupItem>
-                  <ToggleGroupItem value="raw" aria-label="Real Raw mode" className="flex-1 text-xs">
+                  <ToggleGroupItem value="lab" aria-label="JPEG Lab mode" className="flex-1 text-xs bg-background">
+                    JPEG Lab
+                  </ToggleGroupItem>
+                  <ToggleGroupItem value="raw" aria-label="Real Raw mode" className="flex-1 text-xs bg-background">
                     Real Raw
                   </ToggleGroupItem>
-                  <ToggleGroupItem value="lab" aria-label="Lab mode" className="flex-1 text-xs">
-                    Lab
-                  </ToggleGroupItem>
                 </ToggleGroup>
+                <Button 
+                  variant="outline" 
+                  className="w-full mt-3"
+                  onClick={() => setBenchmarkMode(true)}
+                >
+                  Benchmark Mode
+                </Button>
               </CardContent>
             </Card>
 
@@ -1086,7 +1180,7 @@ export default function Index() {
                     <Button variant="outline" className="w-full h-24 flex flex-col gap-2 border-dashed" onClick={() => fileInputRefLab.current?.click()}>
                       <ImageIcon className="w-8 h-8 mb-1 text-muted-foreground" />
                       <div className="text-center">
-                        <span className="text-xs block font-medium">Upload Lab Image</span>
+                        <span className="text-xs block font-medium">Upload JPEG Lab Image</span>
                         <span className="text-[10px] text-muted-foreground">(JPEG, PNG)</span>
                       </div>
                     </Button>
@@ -1256,20 +1350,51 @@ export default function Index() {
                     <div className="space-y-3">
                       <label className="text-xs font-medium text-muted-foreground">Algorithm A</label>
                       {algorithm === 'niu_edge_sensing' && (
-                        <div className="space-y-2">
-                          <div className="flex items-center justify-between text-[10px]">
-                            <span className="text-muted-foreground">Edge Threshold</span>
-                            <span className="font-mono">{params.niuLogisticThreshold?.toFixed(3) ?? '0.100'}</span>
+                        <div className="space-y-4">
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between text-[10px]">
+                              <span className="text-muted-foreground">Edge Threshold</span>
+                              <span className="font-mono">{params.niuLogisticThreshold?.toFixed(3) ?? '0.100'}</span>
+                            </div>
+                            <div
+                              onDoubleClick={() => setParams(prev => {
+                                const { niuLogisticThreshold, ...rest } = prev;
+                                return rest;
+                              })}
+                            >
+                              <Slider
+                                value={[params.niuLogisticThreshold ?? 0.1]}
+                                onValueChange={([v]) => setParams(prev => ({ ...prev, niuLogisticThreshold: v }))}
+                                min={0.001}
+                                max={1.0}
+                                step={0.001}
+                                className="w-full"
+                              />
+                            </div>
+                            <HelpTooltip className="h-3 w-3" content="Threshold for edge detection in the logistic function. Lower values detect more edges, higher values are more selective. Double-click to reset to default (0.1)." />
                           </div>
-                          <Slider
-                            value={[params.niuLogisticThreshold ?? 0.1]}
-                            onValueChange={([v]) => setParams(prev => ({ ...prev, niuLogisticThreshold: v }))}
-                            min={0.001}
-                            max={1.0}
-                            step={0.001}
-                            className="w-full"
-                          />
-                          <HelpTooltip className="h-3 w-3" content="Threshold for edge detection in the logistic function. Lower values detect more edges, higher values are more selective." />
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between text-[10px]">
+                              <span className="text-muted-foreground">Logistic Steepness</span>
+                              <span className="font-mono">{params.niuLogisticSteepness?.toFixed(1) ?? '20.0'}</span>
+                            </div>
+                            <div
+                              onDoubleClick={() => setParams(prev => {
+                                const { niuLogisticSteepness, ...rest } = prev;
+                                return rest;
+                              })}
+                            >
+                              <Slider
+                                value={[params.niuLogisticSteepness ?? 20.0]}
+                                onValueChange={([v]) => setParams(prev => ({ ...prev, niuLogisticSteepness: v }))}
+                                min={1.0}
+                                max={200.0}
+                                step={0.1}
+                                className="w-full"
+                              />
+                            </div>
+                            <HelpTooltip className="h-3 w-3" content="Steepness parameter (k) for the logistic function. Higher values create a sharper transition, lower values create a more gradual transition. Double-click to reset to default (adaptive)." />
+                          </div>
                         </div>
                       )}
                       {algorithm === 'wu_polynomial' && (
@@ -1278,15 +1403,22 @@ export default function Index() {
                             <span className="text-muted-foreground">Polynomial Degree</span>
                             <span className="font-mono">{params.wuPolynomialDegree ?? 2}</span>
                           </div>
-                          <Slider
-                            value={[params.wuPolynomialDegree ?? 2]}
-                            onValueChange={([v]) => setParams(prev => ({ ...prev, wuPolynomialDegree: Math.round(v) }))}
-                            min={1}
-                            max={10}
-                            step={1}
-                            className="w-full"
-                          />
-                          <HelpTooltip className="h-3 w-3" content="Degree of polynomial interpolation. Higher degrees can capture more complex patterns but may overfit." />
+                          <div
+                            onDoubleClick={() => setParams(prev => {
+                              const { wuPolynomialDegree, ...rest } = prev;
+                              return rest;
+                            })}
+                          >
+                            <Slider
+                              value={[params.wuPolynomialDegree ?? 2]}
+                              onValueChange={([v]) => setParams(prev => ({ ...prev, wuPolynomialDegree: Math.round(v) }))}
+                              min={1}
+                              max={10}
+                              step={1}
+                              className="w-full"
+                            />
+                          </div>
+                          <HelpTooltip className="h-3 w-3" content="Degree of polynomial interpolation. Higher degrees can capture more complex patterns but may overfit. Double-click to reset to default (2)." />
                         </div>
                       )}
                       {algorithm === 'kiku_residual' && (
@@ -1295,15 +1427,22 @@ export default function Index() {
                             <span className="text-muted-foreground">Residual Iterations</span>
                             <span className="font-mono">{params.kikuResidualIterations ?? 1}</span>
                           </div>
-                          <Slider
-                            value={[params.kikuResidualIterations ?? 1]}
-                            onValueChange={([v]) => setParams({ ...params, kikuResidualIterations: Math.round(v) })}
-                            min={1}
-                            max={5}
-                            step={1}
-                            className="w-full"
-                          />
-                          <HelpTooltip className="h-3 w-3" content="Number of residual refinement iterations. More iterations can improve quality but increase computation time." />
+                          <div
+                            onDoubleClick={() => setParams(prev => {
+                              const { kikuResidualIterations, ...rest } = prev;
+                              return rest;
+                            })}
+                          >
+                            <Slider
+                              value={[params.kikuResidualIterations ?? 1]}
+                              onValueChange={([v]) => setParams({ ...params, kikuResidualIterations: Math.round(v) })}
+                              min={1}
+                              max={5}
+                              step={1}
+                              className="w-full"
+                            />
+                          </div>
+                          <HelpTooltip className="h-3 w-3" content="Number of residual refinement iterations. More iterations can improve quality but increase computation time. Double-click to reset to default (1)." />
                         </div>
                       )}
                     </div>
@@ -1313,20 +1452,51 @@ export default function Index() {
                     <div className="space-y-3 pt-3 border-t animate-in fade-in slide-in-from-top-2">
                       <label className="text-xs font-medium text-muted-foreground">Algorithm B</label>
                       {algorithm2 === 'niu_edge_sensing' && (
-                        <div className="space-y-2">
-                          <div className="flex items-center justify-between text-[10px]">
-                            <span className="text-muted-foreground">Edge Threshold</span>
-                            <span className="font-mono">{params2.niuLogisticThreshold?.toFixed(3) ?? '0.100'}</span>
+                        <div className="space-y-4">
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between text-[10px]">
+                              <span className="text-muted-foreground">Edge Threshold</span>
+                              <span className="font-mono">{params2.niuLogisticThreshold?.toFixed(3) ?? '0.100'}</span>
+                            </div>
+                            <div
+                              onDoubleClick={() => setParams2(prev => {
+                                const { niuLogisticThreshold, ...rest } = prev;
+                                return rest;
+                              })}
+                            >
+                              <Slider
+                                value={[params2.niuLogisticThreshold ?? 0.1]}
+                                onValueChange={([v]) => setParams2(prev => ({ ...prev, niuLogisticThreshold: v }))}
+                                min={0.001}
+                                max={1.0}
+                                step={0.001}
+                                className="w-full"
+                              />
+                            </div>
+                            <HelpTooltip className="h-3 w-3" content="Threshold for edge detection in the logistic function. Lower values detect more edges, higher values are more selective. Double-click to reset to default (0.1)." />
                           </div>
-                          <Slider
-                            value={[params2.niuLogisticThreshold ?? 0.1]}
-                            onValueChange={([v]) => setParams2(prev => ({ ...prev, niuLogisticThreshold: v }))}
-                            min={0.001}
-                            max={1.0}
-                            step={0.001}
-                            className="w-full"
-                          />
-                          <HelpTooltip className="h-3 w-3" content="Threshold for edge detection in the logistic function. Lower values detect more edges, higher values are more selective." />
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between text-[10px]">
+                              <span className="text-muted-foreground">Logistic Steepness</span>
+                              <span className="font-mono">{params2.niuLogisticSteepness?.toFixed(1) ?? '20.0'}</span>
+                            </div>
+                            <div
+                              onDoubleClick={() => setParams2(prev => {
+                                const { niuLogisticSteepness, ...rest } = prev;
+                                return rest;
+                              })}
+                            >
+                              <Slider
+                                value={[params2.niuLogisticSteepness ?? 20.0]}
+                                onValueChange={([v]) => setParams2(prev => ({ ...prev, niuLogisticSteepness: v }))}
+                                min={1.0}
+                                max={200.0}
+                                step={0.1}
+                                className="w-full"
+                              />
+                            </div>
+                            <HelpTooltip className="h-3 w-3" content="Steepness parameter (k) for the logistic function. Higher values create a sharper transition, lower values create a more gradual transition. Double-click to reset to default (adaptive)." />
+                          </div>
                         </div>
                       )}
                       {algorithm2 === 'wu_polynomial' && (
@@ -1335,15 +1505,22 @@ export default function Index() {
                             <span className="text-muted-foreground">Polynomial Degree</span>
                             <span className="font-mono">{params2.wuPolynomialDegree ?? 2}</span>
                           </div>
-                          <Slider
-                            value={[params2.wuPolynomialDegree ?? 2]}
-                            onValueChange={([v]) => setParams2(prev => ({ ...prev, wuPolynomialDegree: Math.round(v) }))}
-                            min={1}
-                            max={10}
-                            step={1}
-                            className="w-full"
-                          />
-                          <HelpTooltip className="h-3 w-3" content="Degree of polynomial interpolation. Higher degrees can capture more complex patterns but may overfit." />
+                          <div
+                            onDoubleClick={() => setParams2(prev => {
+                              const { wuPolynomialDegree, ...rest } = prev;
+                              return rest;
+                            })}
+                          >
+                            <Slider
+                              value={[params2.wuPolynomialDegree ?? 2]}
+                              onValueChange={([v]) => setParams2(prev => ({ ...prev, wuPolynomialDegree: Math.round(v) }))}
+                              min={1}
+                              max={10}
+                              step={1}
+                              className="w-full"
+                            />
+                          </div>
+                          <HelpTooltip className="h-3 w-3" content="Degree of polynomial interpolation. Higher degrees can capture more complex patterns but may overfit. Double-click to reset to default (2)." />
                         </div>
                       )}
                       {algorithm2 === 'kiku_residual' && (
@@ -1352,15 +1529,22 @@ export default function Index() {
                             <span className="text-muted-foreground">Residual Iterations</span>
                             <span className="font-mono">{params2.kikuResidualIterations ?? 1}</span>
                           </div>
-                          <Slider
-                            value={[params2.kikuResidualIterations ?? 1]}
-                            onValueChange={([v]) => setParams2({ ...params2, kikuResidualIterations: Math.round(v) })}
-                            min={1}
-                            max={5}
-                            step={1}
-                            className="w-full"
-                          />
-                          <HelpTooltip className="h-3 w-3" content="Number of residual refinement iterations. More iterations can improve quality but increase computation time." />
+                          <div
+                            onDoubleClick={() => setParams2(prev => {
+                              const { kikuResidualIterations, ...rest } = prev;
+                              return rest;
+                            })}
+                          >
+                            <Slider
+                              value={[params2.kikuResidualIterations ?? 1]}
+                              onValueChange={([v]) => setParams2({ ...params2, kikuResidualIterations: Math.round(v) })}
+                              min={1}
+                              max={5}
+                              step={1}
+                              className="w-full"
+                            />
+                          </div>
+                          <HelpTooltip className="h-3 w-3" content="Number of residual refinement iterations. More iterations can improve quality but increase computation time. Double-click to reset to default (1)." />
                         </div>
                       )}
                     </div>
@@ -1579,7 +1763,6 @@ export default function Index() {
                     <DemosaicMathExplanation 
                       cfaType={cfaType}
                       algorithm={algorithm}
-                      trace={trace}
                       x={selectedPos?.x}
                       y={selectedPos?.y}
                       error={selectedPos && errorStats && (input?.mode === 'lab' || input?.mode === 'synthetic') ? {
@@ -1588,12 +1771,12 @@ export default function Index() {
                       } : undefined}
                       errorStats={errorStats}
                       input={input}
+                      params={params}
                     />
                     <div className="text-center text-xs font-medium pt-2 border-t">Algorithm B</div>
                     <DemosaicMathExplanation 
                       cfaType={cfaType}
                       algorithm={algorithm2}
-                      trace={trace2}
                       x={selectedPos?.x}
                       y={selectedPos?.y}
                       error={selectedPos && errorStats2 && (input?.mode === 'lab' || input?.mode === 'synthetic') ? {
@@ -1602,13 +1785,13 @@ export default function Index() {
                       } : undefined}
                       errorStats={errorStats2}
                       input={input}
+                      params={params2}
                     />
                 </div>
             ) : (
                 <DemosaicMathExplanation 
                   cfaType={cfaType}
                   algorithm={algorithm}
-                  trace={trace}
                   x={selectedPos?.x}
                   y={selectedPos?.y}
                   error={selectedPos && errorStats && (input?.mode === 'lab' || input?.mode === 'synthetic') ? {
@@ -1617,11 +1800,21 @@ export default function Index() {
                   } : undefined}
                   errorStats={errorStats}
                   input={input}
+                  params={params}
                 />
             )}
           </div>
         </div>
       </main>
+      
+      {/* Floating Benchmark Mode Button */}
+      <Button 
+        variant="outline" 
+        className="fixed bottom-6 right-6 shadow-lg"
+        onClick={() => setBenchmarkMode(true)}
+      >
+        Enter Benchmark Mode
+      </Button>
     </div>
   );
 }

@@ -1,23 +1,102 @@
 import { useEffect, useRef, useState, useMemo } from "react";
 import { Card } from "@/components/ui/card";
-import { DemosaicInput, DemosaicAlgorithm } from "@/types/demosaic";
-import { getBayerKernel } from "@/lib/cfa";
-import { KernelMultiplicationDiagram } from "./KernelMultiplicationDiagram";
+import { DemosaicInput, DemosaicAlgorithm, DemosaicParams } from "@/types/demosaic";
+import { getBayerKernel, getXTransKernel } from "@/lib/cfa";
 
 interface InteractiveDemosaicVisualizerProps {
   input: DemosaicInput;
   centerX: number;
   centerY: number;
   algorithm: DemosaicAlgorithm;
+  params?: DemosaicParams;
 }
 
 const REGION_SIZE = 15; // Odd number for easier centering
+
+// Helper functions for advanced algorithms
+const logisticFunction = (x: number, threshold: number = 0.1, steepness?: number): number => {
+  const k = steepness !== undefined 
+    ? steepness 
+    : 20.0 / Math.max(0.01, threshold);
+  return 1.0 / (1.0 + Math.exp(-k * (x - threshold)));
+};
+
+const computeDirectionalVariations = (
+  cfaData: Float32Array | Uint16Array,
+  width: number,
+  height: number,
+  x: number,
+  y: number,
+  getChannel: (x: number, y: number) => 'r' | 'g' | 'b',
+  getVal: (x: number, y: number) => number
+): { horizontal: number; vertical: number } => {
+  const hVar = Math.abs(getVal(x + 1, y) - getVal(x - 1, y));
+  const vVar = Math.abs(getVal(x, y + 1) - getVal(x, y - 1));
+  return { horizontal: hVar, vertical: vVar };
+};
+
+// Helper to collect neighbors of a specific color with expanding search radius
+const collectNeighbors = (
+  cfaData: Float32Array | Uint16Array,
+  width: number,
+  height: number,
+  x: number,
+  y: number,
+  targetColor: 'r' | 'g' | 'b',
+  getChannel: (x: number, y: number) => 'r' | 'g' | 'b',
+  getVal: (x: number, y: number) => number,
+  maxRadius: number = 10
+): { values: number[]; distances: number[] } => {
+  const result: { values: number[]; distances: number[] } = { values: [], distances: [] };
+  
+  // Collect all neighbors within maxRadius
+  for (let dy = -maxRadius; dy <= maxRadius; dy++) {
+    for (let dx = -maxRadius; dx <= maxRadius; dx++) {
+      if (dx === 0 && dy === 0) continue;
+      const ch = getChannel(x + dx, y + dy);
+      if (ch === targetColor) {
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        result.values.push(getVal(x + dx, y + dy));
+        result.distances.push(dist);
+      }
+    }
+  }
+  
+  return result;
+};
+
+// Polynomial interpolation helper
+const polynomialInterpolate = (
+  values: number[],
+  distances: number[],
+  degree: number = 2
+): number => {
+  if (values.length === 0) return 0;
+  if (values.length === 1) return values[0];
+  
+  if (degree === 1) {
+    return values.reduce((a, b) => a + b, 0) / values.length;
+  }
+  
+  const weights = distances.map((d) => {
+    const dist = Math.max(0.1, d);
+    return 1.0 / (1.0 + Math.pow(dist, degree));
+  });
+  
+  const sumW = weights.reduce((a, b) => a + b, 0);
+  if (sumW === 0) {
+    return values.reduce((a, b) => a + b, 0) / values.length;
+  }
+  
+  return values.reduce((sum, v, i) => sum + v * weights[i], 0) / sumW;
+};
 
 export function InteractiveDemosaicVisualizer({
   input,
   centerX,
   centerY,
   algorithm,
+  params,
 }: InteractiveDemosaicVisualizerProps) {
   const inputCanvasRef = useRef<HTMLCanvasElement>(null);
   const inputOverlayRef = useRef<HTMLCanvasElement>(null);
@@ -48,7 +127,12 @@ export function InteractiveDemosaicVisualizer({
     const inputImageData = new ImageData(REGION_SIZE, REGION_SIZE);
     const outputImageData = new ImageData(REGION_SIZE, REGION_SIZE);
     
-    const getChannel = cfaPattern === 'bayer' ? getBayerKernel(cfaPatternMeta.layout) : () => 'g'; // Fallback
+    // Fix: Properly handle both Bayer and XTrans patterns
+    const getChannel = cfaPattern === 'bayer' 
+      ? getBayerKernel(cfaPatternMeta.layout) 
+      : cfaPattern === 'xtrans'
+      ? getXTransKernel()
+      : () => 'g'; // Fallback only for unknown patterns
     const getVal = (x: number, y: number) => {
         // Mirror padding
         let sx = x; 
@@ -98,26 +182,52 @@ export function InteractiveDemosaicVisualizer({
         if (algorithm === 'nearest') {
             if (ch === 'r') {
                 r = val;
-                g = getVal(gx + 1, gy);
-                b = getVal(gx + 1, gy + 1);
+                // Find nearest G and B
+                for (let d = 1; d <= 10; d++) {
+                    for (let dy = -d; dy <= d; dy++) {
+                        for (let dx = -d; dx <= d; dx++) {
+                            if (dx === 0 && dy === 0) continue;
+                            const dist = Math.sqrt(dx * dx + dy * dy);
+                            if (dist > d - 1 && dist <= d) {
+                                const nch = getChannel(gx + dx, gy + dy);
+                                if (nch === 'g' && g === 0) g = getVal(gx + dx, gy + dy);
+                                if (nch === 'b' && b === 0) b = getVal(gx + dx, gy + dy);
+                            }
+                        }
+                    }
+                    if (g > 0 && b > 0) break;
+                }
             } else if (ch === 'b') {
                 b = val;
-                g = getVal(gx - 1, gy);
-                r = getVal(gx - 1, gy - 1);
+                for (let d = 1; d <= 10; d++) {
+                    for (let dy = -d; dy <= d; dy++) {
+                        for (let dx = -d; dx <= d; dx++) {
+                            if (dx === 0 && dy === 0) continue;
+                            const dist = Math.sqrt(dx * dx + dy * dy);
+                            if (dist > d - 1 && dist <= d) {
+                                const nch = getChannel(gx + dx, gy + dy);
+                                if (nch === 'g' && g === 0) g = getVal(gx + dx, gy + dy);
+                                if (nch === 'r' && r === 0) r = getVal(gx + dx, gy + dy);
+                            }
+                        }
+                    }
+                    if (g > 0 && r > 0) break;
+                }
             } else { // Green
                 g = val;
-                // Check if we are on Red row or Blue row (for Bayer RGGB)
-                // Simple heuristic: look at neighbors
-                const leftCh = getChannel(gx - 1, gy);
-                const rightCh = getChannel(gx + 1, gy);
-                const isRedRow = (leftCh === 'r' || rightCh === 'r');
-                
-                if (isRedRow) {
-                    r = getVal(gx + 1, gy);
-                    b = getVal(gx, gy + 1);
-                } else {
-                    b = getVal(gx + 1, gy);
-                    r = getVal(gx, gy + 1);
+                for (let d = 1; d <= 10; d++) {
+                    for (let dy = -d; dy <= d; dy++) {
+                        for (let dx = -d; dx <= d; dx++) {
+                            if (dx === 0 && dy === 0) continue;
+                            const dist = Math.sqrt(dx * dx + dy * dy);
+                            if (dist > d - 1 && dist <= d) {
+                                const nch = getChannel(gx + dx, gy + dy);
+                                if (nch === 'r' && r === 0) r = getVal(gx + dx, gy + dy);
+                                if (nch === 'b' && b === 0) b = getVal(gx + dx, gy + dy);
+                            }
+                        }
+                    }
+                    if (r > 0 && b > 0) break;
                 }
             }
         } else if (algorithm === 'bilinear') {
@@ -143,6 +253,345 @@ export function InteractiveDemosaicVisualizer({
                 g = (getVal(gx-1, gy) + getVal(gx+1, gy) + getVal(gx, gy-1) + getVal(gx, gy+1)) / 4;
                 r = (getVal(gx-1, gy-1) + getVal(gx+1, gy-1) + getVal(gx-1, gy+1) + getVal(gx+1, gy+1)) / 4;
             }
+        } else if (algorithm === 'niu_edge_sensing') {
+            // Simplified: First pass green interpolation
+            let greenInterp = 0;
+            if (ch === 'g') {
+                greenInterp = val;
+            } else {
+                const threshold = params?.niuLogisticThreshold ?? 0.1;
+                const steepness = params?.niuLogisticSteepness;
+                const vars = computeDirectionalVariations(cfaData, width, height, gx, gy, getChannel, getVal);
+                const wH = logisticFunction(vars.horizontal, threshold, steepness);
+                const wV = logisticFunction(vars.vertical, threshold, steepness);
+                const sumW = wH + wV;
+                const nH = (sumW > 0) ? (1.0 - wH / sumW) : 0.5;
+                const nV = (sumW > 0) ? (1.0 - wV / sumW) : 0.5;
+                const gH = (getVal(gx - 1, gy) + getVal(gx + 1, gy)) / 2;
+                const gV = (getVal(gx, gy - 1) + getVal(gx, gy + 1)) / 2;
+                greenInterp = (gH * nH + gV * nV) / (nH + nV);
+            }
+            
+            // Second pass: R/B interpolation
+            if (ch === 'r') {
+                r = val;
+                g = greenInterp;
+                const bMinusG = [
+                    getVal(gx - 1, gy - 1) - greenInterp,
+                    getVal(gx + 1, gy - 1) - greenInterp,
+                    getVal(gx - 1, gy + 1) - greenInterp,
+                    getVal(gx + 1, gy + 1) - greenInterp
+                ];
+                const avgBMinusG = bMinusG.reduce((a, b) => a + b, 0) / bMinusG.length;
+                b = g + avgBMinusG;
+            } else if (ch === 'b') {
+                b = val;
+                g = greenInterp;
+                const rMinusG = [
+                    getVal(gx - 1, gy - 1) - greenInterp,
+                    getVal(gx + 1, gy - 1) - greenInterp,
+                    getVal(gx - 1, gy + 1) - greenInterp,
+                    getVal(gx + 1, gy + 1) - greenInterp
+                ];
+                const avgRMinusG = rMinusG.reduce((a, b) => a + b, 0) / rMinusG.length;
+                r = g + avgRMinusG;
+            } else {
+                g = val;
+                const leftCh = getChannel(gx - 1, gy);
+                const isRedRow = (leftCh === 'r' || getChannel(gx + 1, gy) === 'r');
+                if (isRedRow) {
+                    r = (getVal(gx - 1, gy) + getVal(gx + 1, gy)) / 2;
+                    b = (getVal(gx, gy - 1) + getVal(gx, gy + 1)) / 2;
+                } else {
+                    r = (getVal(gx, gy - 1) + getVal(gx, gy + 1)) / 2;
+                    b = (getVal(gx - 1, gy) + getVal(gx + 1, gy)) / 2;
+                }
+            }
+        } else if (algorithm === 'lien_edge_based') {
+            if (ch === 'g') {
+                g = val;
+                const diffH = Math.abs(getVal(gx - 1, gy) - getVal(gx + 1, gy));
+                const diffV = Math.abs(getVal(gx, gy - 1) - getVal(gx, gy + 1));
+                const leftCh = getChannel(gx - 1, gy);
+                const isRedRow = (leftCh === 'r' || getChannel(gx + 1, gy) === 'r');
+                
+                if (isRedRow) {
+                    if (diffH < diffV) {
+                        r = (getVal(gx - 1, gy) + getVal(gx + 1, gy)) / 2;
+                        b = (getVal(gx, gy - 1) + getVal(gx, gy + 1)) / 2;
+                    } else {
+                        r = (getVal(gx, gy - 1) + getVal(gx, gy + 1)) / 2;
+                        b = (getVal(gx - 1, gy) + getVal(gx + 1, gy)) / 2;
+                    }
+                } else {
+                    if (diffH < diffV) {
+                        r = (getVal(gx, gy - 1) + getVal(gx, gy + 1)) / 2;
+                        b = (getVal(gx - 1, gy) + getVal(gx + 1, gy)) / 2;
+                    } else {
+                        r = (getVal(gx - 1, gy) + getVal(gx + 1, gy)) / 2;
+                        b = (getVal(gx, gy - 1) + getVal(gx, gy + 1)) / 2;
+                    }
+                }
+            } else if (ch === 'r') {
+                r = val;
+                const diffH = Math.abs(getVal(gx - 1, gy) - getVal(gx + 1, gy));
+                const diffV = Math.abs(getVal(gx, gy - 1) - getVal(gx, gy + 1));
+                if (diffH < diffV) {
+                    g = (getVal(gx - 1, gy) + getVal(gx + 1, gy)) / 2;
+                } else {
+                    g = (getVal(gx, gy - 1) + getVal(gx, gy + 1)) / 2;
+                }
+                const avgB = (getVal(gx - 1, gy - 1) + getVal(gx + 1, gy - 1) + getVal(gx - 1, gy + 1) + getVal(gx + 1, gy + 1)) / 4;
+                const avgG = (getVal(gx - 1, gy) + getVal(gx + 1, gy) + getVal(gx, gy - 1) + getVal(gx, gy + 1)) / 4;
+                b = avgB + (g - avgG);
+            } else { // Blue
+                b = val;
+                const diffH = Math.abs(getVal(gx - 1, gy) - getVal(gx + 1, gy));
+                const diffV = Math.abs(getVal(gx, gy - 1) - getVal(gx, gy + 1));
+                if (diffH < diffV) {
+                    g = (getVal(gx - 1, gy) + getVal(gx + 1, gy)) / 2;
+                } else {
+                    g = (getVal(gx, gy - 1) + getVal(gx, gy + 1)) / 2;
+                }
+                const avgR = (getVal(gx - 1, gy - 1) + getVal(gx + 1, gy - 1) + getVal(gx - 1, gy + 1) + getVal(gx + 1, gy + 1)) / 4;
+                const avgG = (getVal(gx - 1, gy) + getVal(gx + 1, gy) + getVal(gx, gy - 1) + getVal(gx, gy + 1)) / 4;
+                r = avgR + (g - avgG);
+            }
+        } else if (algorithm === 'wu_polynomial') {
+            // First pass: Compute green interpolation for this region
+            // We need to compute green for all pixels first, then use it
+            // For region view, we compute green interpolation on-the-fly
+            const degree = 2; // Default polynomial degree
+            
+            let greenInterp = 0;
+            if (ch === 'g') {
+                greenInterp = val;
+            } else {
+                // Use polynomial interpolation for green
+                const gNeighbors = collectNeighbors(cfaData, width, height, gx, gy, 'g', getChannel, getVal);
+                if (gNeighbors.values.length > 0) {
+                    greenInterp = polynomialInterpolate(gNeighbors.values, gNeighbors.distances, degree);
+                } else {
+                    greenInterp = val;
+                }
+            }
+            
+            // Second pass: Interpolate R/B using polynomial interpolation
+            if (ch === 'r') {
+                r = val;
+                g = greenInterp;
+                const bNeighbors = collectNeighbors(cfaData, width, height, gx, gy, 'b', getChannel, getVal);
+                if (bNeighbors.values.length > 0) {
+                    b = polynomialInterpolate(bNeighbors.values, bNeighbors.distances, degree);
+                } else {
+                    b = g;
+                }
+            } else if (ch === 'b') {
+                b = val;
+                g = greenInterp;
+                const rNeighbors = collectNeighbors(cfaData, width, height, gx, gy, 'r', getChannel, getVal);
+                if (rNeighbors.values.length > 0) {
+                    r = polynomialInterpolate(rNeighbors.values, rNeighbors.distances, degree);
+                } else {
+                    r = g;
+                }
+            } else {
+                g = val;
+                greenInterp = val;
+                const rNeighbors = collectNeighbors(cfaData, width, height, gx, gy, 'r', getChannel, getVal);
+                const bNeighbors = collectNeighbors(cfaData, width, height, gx, gy, 'b', getChannel, getVal);
+                if (rNeighbors.values.length > 0) {
+                    r = polynomialInterpolate(rNeighbors.values, rNeighbors.distances, degree);
+                }
+                if (bNeighbors.values.length > 0) {
+                    b = polynomialInterpolate(bNeighbors.values, bNeighbors.distances, degree);
+                }
+            }
+        } else if (algorithm === 'kiku_residual') {
+            // Kiku residual interpolation requires computing initial estimates first
+            // For region view, we compute bilinear estimates for all region pixels
+            // Then compute and interpolate residuals
+            
+            // First: Compute initial bilinear estimate for this pixel
+            let initialR = 0, initialG = 0, initialB = 0;
+            if (ch === 'g') {
+                initialG = val;
+                const leftCh = getChannel(gx - 1, gy);
+                const rightCh = getChannel(gx + 1, gy);
+                const isRedRow = (leftCh === 'r' || rightCh === 'r');
+                if (isRedRow) {
+                    initialR = (getVal(gx-1, gy) + getVal(gx+1, gy)) / 2;
+                    initialB = (getVal(gx, gy-1) + getVal(gx, gy+1)) / 2;
+                } else {
+                    initialR = (getVal(gx, gy-1) + getVal(gx, gy+1)) / 2;
+                    initialB = (getVal(gx-1, gy) + getVal(gx+1, gy)) / 2;
+                }
+            } else if (ch === 'r') {
+                initialR = val;
+                initialG = (getVal(gx-1, gy) + getVal(gx+1, gy) + getVal(gx, gy-1) + getVal(gx, gy+1)) / 4;
+                initialB = (getVal(gx-1, gy-1) + getVal(gx+1, gy-1) + getVal(gx-1, gy+1) + getVal(gx+1, gy+1)) / 4;
+            } else {
+                initialB = val;
+                initialG = (getVal(gx-1, gy) + getVal(gx+1, gy) + getVal(gx, gy-1) + getVal(gx, gy+1)) / 4;
+                initialR = (getVal(gx-1, gy-1) + getVal(gx+1, gy-1) + getVal(gx-1, gy+1) + getVal(gx+1, gy+1)) / 4;
+            }
+            
+            // Compute residual at this pixel (observed - estimated)
+            let residualR = 0, residualG = 0, residualB = 0;
+            if (ch === 'r') {
+                residualR = val - initialR;
+            } else if (ch === 'g') {
+                residualG = val - initialG;
+            } else {
+                residualB = val - initialB;
+            }
+            
+            // Interpolate residuals from neighbors using the same pattern as bilinear
+            // For each missing channel, average residuals from neighbors of that color
+            let interpolatedResidualR = 0, interpolatedResidualG = 0, interpolatedResidualB = 0;
+            
+            // Helper to compute initial estimate at a neighbor pixel (for residual computation)
+            const getInitialEstimate = (px: number, py: number, targetCh: 'r' | 'g' | 'b'): number => {
+                const nch = getChannel(px, py);
+                const nval = getVal(px, py);
+                if (nch === targetCh) return nval;
+                
+                // Compute bilinear estimate
+                if (targetCh === 'g') {
+                    if (nch === 'r' || nch === 'b') {
+                        return (getVal(px-1, py) + getVal(px+1, py) + getVal(px, py-1) + getVal(px, py+1)) / 4;
+                    }
+                } else if (targetCh === 'r') {
+                    if (nch === 'b') {
+                        return (getVal(px-1, py-1) + getVal(px+1, py-1) + getVal(px-1, py+1) + getVal(px+1, py+1)) / 4;
+                    } else if (nch === 'g') {
+                        const leftCh = getChannel(px - 1, py);
+                        const isRedRow = (leftCh === 'r' || getChannel(px + 1, py) === 'r');
+                        return isRedRow ? (getVal(px-1, py) + getVal(px+1, py)) / 2 : (getVal(px, py-1) + getVal(px, py+1)) / 2;
+                    }
+                } else { // targetCh === 'b'
+                    if (nch === 'r') {
+                        return (getVal(px-1, py-1) + getVal(px+1, py-1) + getVal(px-1, py+1) + getVal(px+1, py+1)) / 4;
+                    } else if (nch === 'g') {
+                        const leftCh = getChannel(px - 1, py);
+                        const isRedRow = (leftCh === 'r' || getChannel(px + 1, py) === 'r');
+                        return isRedRow ? (getVal(px, py-1) + getVal(px, py+1)) / 2 : (getVal(px-1, py) + getVal(px+1, py)) / 2;
+                    }
+                }
+                return 0;
+            };
+            
+            // Compute and interpolate residuals using expanding search
+            // Helper to collect residual neighbors with positions
+            const collectResidualNeighborsWithPos = (
+                targetColor: 'r' | 'g' | 'b',
+                maxRadius: number = 5
+            ): Array<{x: number, y: number, residual: number}> => {
+                const results: Array<{x: number, y: number, residual: number}> = [];
+                for (let dy = -maxRadius; dy <= maxRadius; dy++) {
+                    for (let dx = -maxRadius; dx <= maxRadius; dx++) {
+                        if (dx === 0 && dy === 0) continue;
+                        const nx = gx + dx;
+                        const ny = gy + dy;
+                        if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+                        const nch = getChannel(nx, ny);
+                        if (nch === targetColor) {
+                            const nval = getVal(nx, ny);
+                            const nestimate = getInitialEstimate(nx, ny, targetColor);
+                            results.push({x: nx, y: ny, residual: nval - nestimate});
+                        }
+                    }
+                }
+                return results;
+            };
+            
+            if (ch === 'r') {
+                interpolatedResidualR = residualR;
+                const gResidualNeighbors = collectResidualNeighborsWithPos('g', 5);
+                const bResidualNeighbors = collectResidualNeighborsWithPos('b', 5);
+                if (gResidualNeighbors.length > 0) {
+                    interpolatedResidualG = gResidualNeighbors.reduce((sum, n) => sum + n.residual, 0) / gResidualNeighbors.length;
+                }
+                if (bResidualNeighbors.length > 0) {
+                    interpolatedResidualB = bResidualNeighbors.reduce((sum, n) => sum + n.residual, 0) / bResidualNeighbors.length;
+                }
+            } else if (ch === 'g') {
+                interpolatedResidualG = residualG;
+                const rResidualNeighbors = collectResidualNeighborsWithPos('r', 5);
+                const bResidualNeighbors = collectResidualNeighborsWithPos('b', 5);
+                if (rResidualNeighbors.length > 0) {
+                    interpolatedResidualR = rResidualNeighbors.reduce((sum, n) => sum + n.residual, 0) / rResidualNeighbors.length;
+                }
+                if (bResidualNeighbors.length > 0) {
+                    interpolatedResidualB = bResidualNeighbors.reduce((sum, n) => sum + n.residual, 0) / bResidualNeighbors.length;
+                }
+            } else { // Blue
+                interpolatedResidualB = residualB;
+                const gResidualNeighbors = collectResidualNeighborsWithPos('g', 5);
+                const rResidualNeighbors = collectResidualNeighborsWithPos('r', 5);
+                if (gResidualNeighbors.length > 0) {
+                    interpolatedResidualG = gResidualNeighbors.reduce((sum, n) => sum + n.residual, 0) / gResidualNeighbors.length;
+                }
+                if (rResidualNeighbors.length > 0) {
+                    interpolatedResidualR = rResidualNeighbors.reduce((sum, n) => sum + n.residual, 0) / rResidualNeighbors.length;
+                }
+            }
+            
+            // Refined estimate: initial + interpolated residual
+            r = initialR + interpolatedResidualR;
+            g = initialG + interpolatedResidualG;
+            b = initialB + interpolatedResidualB;
+        } else {
+            // Fallback: use nearest
+            if (ch === 'r') {
+                r = val;
+                for (let d = 1; d <= 10; d++) {
+                    for (let dy = -d; dy <= d; dy++) {
+                        for (let dx = -d; dx <= d; dx++) {
+                            if (dx === 0 && dy === 0) continue;
+                            const dist = Math.sqrt(dx * dx + dy * dy);
+                            if (dist > d - 1 && dist <= d) {
+                                const nch = getChannel(gx + dx, gy + dy);
+                                if (nch === 'g' && g === 0) g = getVal(gx + dx, gy + dy);
+                                if (nch === 'b' && b === 0) b = getVal(gx + dx, gy + dy);
+                            }
+                        }
+                    }
+                    if (g > 0 && b > 0) break;
+                }
+            } else if (ch === 'b') {
+                b = val;
+                for (let d = 1; d <= 10; d++) {
+                    for (let dy = -d; dy <= d; dy++) {
+                        for (let dx = -d; dx <= d; dx++) {
+                            if (dx === 0 && dy === 0) continue;
+                            const dist = Math.sqrt(dx * dx + dy * dy);
+                            if (dist > d - 1 && dist <= d) {
+                                const nch = getChannel(gx + dx, gy + dy);
+                                if (nch === 'g' && g === 0) g = getVal(gx + dx, gy + dy);
+                                if (nch === 'r' && r === 0) r = getVal(gx + dx, gy + dy);
+                            }
+                        }
+                    }
+                    if (g > 0 && r > 0) break;
+                }
+            } else {
+                g = val;
+                for (let d = 1; d <= 10; d++) {
+                    for (let dy = -d; dy <= d; dy++) {
+                        for (let dx = -d; dx <= d; dx++) {
+                            if (dx === 0 && dy === 0) continue;
+                            const dist = Math.sqrt(dx * dx + dy * dy);
+                            if (dist > d - 1 && dist <= d) {
+                                const nch = getChannel(gx + dx, gy + dy);
+                                if (nch === 'r' && r === 0) r = getVal(gx + dx, gy + dy);
+                                if (nch === 'b' && b === 0) b = getVal(gx + dx, gy + dy);
+                            }
+                        }
+                    }
+                    if (r > 0 && b > 0) break;
+                }
+            }
         }
         
         outputImageData.data[idx] = Math.min(255, Math.max(0, Math.round(r * 255)));
@@ -160,7 +609,11 @@ export function InteractiveDemosaicVisualizer({
     const gx = globalCursorX;
     const gy = globalCursorY;
     const { width, height, cfaPatternMeta, cfaPattern } = input;
-    const getChannel = cfaPattern === 'bayer' ? getBayerKernel(cfaPatternMeta.layout) : () => 'g';
+    const getChannel = cfaPattern === 'bayer' 
+      ? getBayerKernel(cfaPatternMeta.layout) 
+      : cfaPattern === 'xtrans'
+      ? getXTransKernel()
+      : () => 'g';
     const centerCh = getChannel(gx, gy);
     
     // Define a small window around cursor to show weights, e.g., 3x3
@@ -197,32 +650,367 @@ export function InteractiveDemosaicVisualizer({
     } else if (algorithm === 'bilinear') {
         if (centerCh === 'g') {
             wG[1][1] = 1; // Identity
+            // Red neighbors - check actual positions
+            const redNeighbors = [
+                { x: -1, y: 0 }, { x: 1, y: 0 }, { x: 0, y: -1 }, { x: 0, y: 1 }
+            ].filter(pos => {
+                const px = gx + pos.x;
+                const py = gy + pos.y;
+                return px >= 0 && px < input.width && py >= 0 && py < input.height && getChannel(px, py) === 'r';
+            });
+            // Blue neighbors - check actual positions
+            const blueNeighbors = [
+                { x: -1, y: 0 }, { x: 1, y: 0 }, { x: 0, y: -1 }, { x: 0, y: 1 }
+            ].filter(pos => {
+                const px = gx + pos.x;
+                const py = gy + pos.y;
+                return px >= 0 && px < input.width && py >= 0 && py < input.height && getChannel(px, py) === 'b';
+            });
             const leftCh = getChannel(gx - 1, gy);
-            const rightCh = getChannel(gx + 1, gy);
-            const isRedRow = (leftCh === 'r' || rightCh === 'r');
+            const isRedRow = (leftCh === 'r' || getChannel(gx + 1, gy) === 'r');
             if (isRedRow) {
                 // Red neighbors are Left/Right
-                wR[1][0] = 0.5; wR[1][2] = 0.5;
+                const redLR = redNeighbors.filter(pos => pos.x !== 0);
+                const redWeight = redLR.length > 0 ? 1.0 / redLR.length : 0;
+                redLR.forEach(pos => {
+                    wR[1 + pos.y][1 + pos.x] = redWeight;
+                });
                 // Blue neighbors are Top/Bottom
-                wB[0][1] = 0.5; wB[2][1] = 0.5;
+                const blueTB = blueNeighbors.filter(pos => pos.y !== 0);
+                const blueWeight = blueTB.length > 0 ? 1.0 / blueTB.length : 0;
+                blueTB.forEach(pos => {
+                    wB[1 + pos.y][1 + pos.x] = blueWeight;
+                });
             } else {
                 // Blue neighbors are Left/Right
-                wB[1][0] = 0.5; wB[1][2] = 0.5;
+                const blueLR = blueNeighbors.filter(pos => pos.x !== 0);
+                const blueWeight = blueLR.length > 0 ? 1.0 / blueLR.length : 0;
+                blueLR.forEach(pos => {
+                    wB[1 + pos.y][1 + pos.x] = blueWeight;
+                });
                 // Red neighbors are Top/Bottom
+                const redTB = redNeighbors.filter(pos => pos.y !== 0);
+                const redWeight = redTB.length > 0 ? 1.0 / redTB.length : 0;
+                redTB.forEach(pos => {
+                    wR[1 + pos.y][1 + pos.x] = redWeight;
+                });
+            }
+        } else if (centerCh === 'r') {
+            wR[1][1] = 1;
+            // Green: Cross average - only count actual green pixels
+            const greenCross = [
+                { x: -1, y: 0 }, { x: 1, y: 0 },
+                { x: 0, y: -1 }, { x: 0, y: 1 }
+            ].filter(pos => {
+                const px = gx + pos.x;
+                const py = gy + pos.y;
+                return px >= 0 && px < input.width && py >= 0 && py < input.height && getChannel(px, py) === 'g';
+            });
+            const greenWeight = greenCross.length > 0 ? 1.0 / greenCross.length : 0;
+            greenCross.forEach(pos => {
+                wG[1 + pos.y][1 + pos.x] = greenWeight;
+            });
+            // Blue: Only set weights at corners that are actually blue in the CFA
+            const blueCorners = [
+                { x: -1, y: -1 }, { x: 1, y: -1 },
+                { x: -1, y: 1 }, { x: 1, y: 1 }
+            ].filter(pos => {
+                const px = gx + pos.x;
+                const py = gy + pos.y;
+                return px >= 0 && px < input.width && py >= 0 && py < input.height && getChannel(px, py) === 'b';
+            });
+            const blueWeight = blueCorners.length > 0 ? 1.0 / blueCorners.length : 0;
+            blueCorners.forEach(pos => {
+                wB[1 + pos.y][1 + pos.x] = blueWeight;
+            });
+        } else { // Blue
+            wB[1][1] = 1;
+            // Green: Cross average - only count actual green pixels
+            const greenCross = [
+                { x: -1, y: 0 }, { x: 1, y: 0 },
+                { x: 0, y: -1 }, { x: 0, y: 1 }
+            ].filter(pos => {
+                const px = gx + pos.x;
+                const py = gy + pos.y;
+                return px >= 0 && px < input.width && py >= 0 && py < input.height && getChannel(px, py) === 'g';
+            });
+            const greenWeight = greenCross.length > 0 ? 1.0 / greenCross.length : 0;
+            greenCross.forEach(pos => {
+                wG[1 + pos.y][1 + pos.x] = greenWeight;
+            });
+            // Red: Only set weights at corners that are actually red in the CFA
+            const redCorners = [
+                { x: -1, y: -1 }, { x: 1, y: -1 },
+                { x: -1, y: 1 }, { x: 1, y: 1 }
+            ].filter(pos => {
+                const px = gx + pos.x;
+                const py = gy + pos.y;
+                return px >= 0 && px < input.width && py >= 0 && py < input.height && getChannel(px, py) === 'r';
+            });
+            const redWeight = redCorners.length > 0 ? 1.0 / redCorners.length : 0;
+            redCorners.forEach(pos => {
+                wR[1 + pos.y][1 + pos.x] = redWeight;
+            });
+        }
+    } else if (algorithm === 'niu_edge_sensing') {
+        // Similar to bilinear but weights depend on edge direction
+        const threshold = params?.niuLogisticThreshold ?? 0.1;
+        const steepness = params?.niuLogisticSteepness;
+        const getVal = (x: number, y: number) => {
+          if (x < 0 || x >= input.width || y < 0 || y >= input.height) return 0;
+          return input.cfaData[y * input.width + x];
+        };
+        
+        if (centerCh === 'r') {
+            wR[1][1] = 1;
+            // Green: weighted average of cross (edge-aware) - only count actual green pixels
+            const greenHorizontal = [
+                { x: -1, y: 0 }, { x: 1, y: 0 }
+            ].filter(pos => {
+                const px = gx + pos.x;
+                const py = gy + pos.y;
+                return px >= 0 && px < input.width && py >= 0 && py < input.height && getChannel(px, py) === 'g';
+            });
+            const greenVertical = [
+                { x: 0, y: -1 }, { x: 0, y: 1 }
+            ].filter(pos => {
+                const px = gx + pos.x;
+                const py = gy + pos.y;
+                return px >= 0 && px < input.width && py >= 0 && py < input.height && getChannel(px, py) === 'g';
+            });
+            const vars = computeDirectionalVariations(input.cfaData, input.width, input.height, gx, gy, getChannel, getVal);
+            const wH = logisticFunction(vars.horizontal, threshold, steepness);
+            const wV = logisticFunction(vars.vertical, threshold, steepness);
+            const sumW = wH + wV;
+            const nH = (sumW > 0) ? (1.0 - wH / sumW) : 0.5;
+            const nV = (sumW > 0) ? (1.0 - wV / sumW) : 0.5;
+            const totalWeight = nH + nV;
+            if (totalWeight > 0 && greenHorizontal.length > 0) {
+                const hWeight = (nH / totalWeight) / greenHorizontal.length;
+                greenHorizontal.forEach(pos => {
+                    wG[1 + pos.y][1 + pos.x] = hWeight;
+                });
+            }
+            if (totalWeight > 0 && greenVertical.length > 0) {
+                const vWeight = (nV / totalWeight) / greenVertical.length;
+                greenVertical.forEach(pos => {
+                    wG[1 + pos.y][1 + pos.x] = vWeight;
+                });
+            }
+            // Blue: Only set weights at corners that are actually blue in the CFA
+            const blueCorners = [
+                { x: -1, y: -1 }, { x: 1, y: -1 },
+                { x: -1, y: 1 }, { x: 1, y: 1 }
+            ].filter(pos => {
+                const px = gx + pos.x;
+                const py = gy + pos.y;
+                return px >= 0 && px < input.width && py >= 0 && py < input.height && getChannel(px, py) === 'b';
+            });
+            const blueWeight = blueCorners.length > 0 ? 1.0 / blueCorners.length : 0;
+            blueCorners.forEach(pos => {
+                wB[1 + pos.y][1 + pos.x] = blueWeight;
+            });
+        } else if (centerCh === 'b') {
+            wB[1][1] = 1;
+            // Green: weighted average of cross (edge-aware) - only count actual green pixels
+            const greenHorizontal = [
+                { x: -1, y: 0 }, { x: 1, y: 0 }
+            ].filter(pos => {
+                const px = gx + pos.x;
+                const py = gy + pos.y;
+                return px >= 0 && px < input.width && py >= 0 && py < input.height && getChannel(px, py) === 'g';
+            });
+            const greenVertical = [
+                { x: 0, y: -1 }, { x: 0, y: 1 }
+            ].filter(pos => {
+                const px = gx + pos.x;
+                const py = gy + pos.y;
+                return px >= 0 && px < input.width && py >= 0 && py < input.height && getChannel(px, py) === 'g';
+            });
+            const vars = computeDirectionalVariations(input.cfaData, input.width, input.height, gx, gy, getChannel, getVal);
+            const wH = logisticFunction(vars.horizontal, threshold, steepness);
+            const wV = logisticFunction(vars.vertical, threshold, steepness);
+            const sumW = wH + wV;
+            const nH = (sumW > 0) ? (1.0 - wH / sumW) : 0.5;
+            const nV = (sumW > 0) ? (1.0 - wV / sumW) : 0.5;
+            const totalWeight = nH + nV;
+            if (totalWeight > 0 && greenHorizontal.length > 0) {
+                const hWeight = (nH / totalWeight) / greenHorizontal.length;
+                greenHorizontal.forEach(pos => {
+                    wG[1 + pos.y][1 + pos.x] = hWeight;
+                });
+            }
+            if (totalWeight > 0 && greenVertical.length > 0) {
+                const vWeight = (nV / totalWeight) / greenVertical.length;
+                greenVertical.forEach(pos => {
+                    wG[1 + pos.y][1 + pos.x] = vWeight;
+                });
+            }
+            // Red: Only set weights at corners that are actually red in the CFA
+            const redCorners = [
+                { x: -1, y: -1 }, { x: 1, y: -1 },
+                { x: -1, y: 1 }, { x: 1, y: 1 }
+            ].filter(pos => {
+                const px = gx + pos.x;
+                const py = gy + pos.y;
+                return px >= 0 && px < input.width && py >= 0 && py < input.height && getChannel(px, py) === 'r';
+            });
+            const redWeight = redCorners.length > 0 ? 1.0 / redCorners.length : 0;
+            redCorners.forEach(pos => {
+                wR[1 + pos.y][1 + pos.x] = redWeight;
+            });
+        } else { // Green
+            wG[1][1] = 1;
+            const leftCh = getChannel(gx - 1, gy);
+            const isRedRow = (leftCh === 'r' || getChannel(gx + 1, gy) === 'r');
+            if (isRedRow) {
+                wR[1][0] = 0.5; wR[1][2] = 0.5;
+                wB[0][1] = 0.5; wB[2][1] = 0.5;
+            } else {
+                wB[1][0] = 0.5; wB[1][2] = 0.5;
+                wR[0][1] = 0.5; wR[2][1] = 0.5;
+            }
+        }
+    } else if (algorithm === 'lien_edge_based') {
+        // Similar to bilinear but with edge-aware interpolation
+        if (centerCh === 'g') {
+            wG[1][1] = 1;
+            const leftCh = getChannel(gx - 1, gy);
+            const isRedRow = (leftCh === 'r' || getChannel(gx + 1, gy) === 'r');
+            // Edge direction determines which neighbors to use (simplified: use bilinear pattern)
+            if (isRedRow) {
+                wR[1][0] = 0.5; wR[1][2] = 0.5;
+                wB[0][1] = 0.5; wB[2][1] = 0.5;
+            } else {
+                wB[1][0] = 0.5; wB[1][2] = 0.5;
                 wR[0][1] = 0.5; wR[2][1] = 0.5;
             }
         } else if (centerCh === 'r') {
             wR[1][1] = 1;
-            // Green: Cross average
-            wG[0][1] = 0.25; wG[1][0] = 0.25; wG[1][2] = 0.25; wG[2][1] = 0.25;
-            // Blue: Corners average
-            wB[0][0] = 0.25; wB[0][2] = 0.25; wB[2][0] = 0.25; wB[2][2] = 0.25;
-        } else { // Blue
+            // Edge-aware green (simplified: use cross average) - only count actual green pixels
+            const greenCross = [
+                { x: -1, y: 0 }, { x: 1, y: 0 },
+                { x: 0, y: -1 }, { x: 0, y: 1 }
+            ].filter(pos => {
+                const px = gx + pos.x;
+                const py = gy + pos.y;
+                return px >= 0 && px < input.width && py >= 0 && py < input.height && getChannel(px, py) === 'g';
+            });
+            const greenWeight = greenCross.length > 0 ? 1.0 / greenCross.length : 0;
+            greenCross.forEach(pos => {
+                wG[1 + pos.y][1 + pos.x] = greenWeight;
+            });
+            // Blue: Only set weights at corners that are actually blue in the CFA
+            const blueCorners = [
+                { x: -1, y: -1 }, { x: 1, y: -1 },
+                { x: -1, y: 1 }, { x: 1, y: 1 }
+            ].filter(pos => {
+                const px = gx + pos.x;
+                const py = gy + pos.y;
+                return px >= 0 && px < input.width && py >= 0 && py < input.height && getChannel(px, py) === 'b';
+            });
+            const blueWeight = blueCorners.length > 0 ? 1.0 / blueCorners.length : 0;
+            blueCorners.forEach(pos => {
+                wB[1 + pos.y][1 + pos.x] = blueWeight;
+            });
+        } else {
             wB[1][1] = 1;
-            // Green: Cross average
-            wG[0][1] = 0.25; wG[1][0] = 0.25; wG[1][2] = 0.25; wG[2][1] = 0.25;
-            // Red: Corners average
-            wR[0][0] = 0.25; wR[0][2] = 0.25; wR[2][0] = 0.25; wR[2][2] = 0.25;
+            // Green: Cross average - only count actual green pixels
+            const greenCross = [
+                { x: -1, y: 0 }, { x: 1, y: 0 },
+                { x: 0, y: -1 }, { x: 0, y: 1 }
+            ].filter(pos => {
+                const px = gx + pos.x;
+                const py = gy + pos.y;
+                return px >= 0 && px < input.width && py >= 0 && py < input.height && getChannel(px, py) === 'g';
+            });
+            const greenWeight = greenCross.length > 0 ? 1.0 / greenCross.length : 0;
+            greenCross.forEach(pos => {
+                wG[1 + pos.y][1 + pos.x] = greenWeight;
+            });
+            // Red: Only set weights at corners that are actually red in the CFA
+            const redCorners = [
+                { x: -1, y: -1 }, { x: 1, y: -1 },
+                { x: -1, y: 1 }, { x: 1, y: 1 }
+            ].filter(pos => {
+                const px = gx + pos.x;
+                const py = gy + pos.y;
+                return px >= 0 && px < input.width && py >= 0 && py < input.height && getChannel(px, py) === 'r';
+            });
+            const redWeight = redCorners.length > 0 ? 1.0 / redCorners.length : 0;
+            redCorners.forEach(pos => {
+                wR[1 + pos.y][1 + pos.x] = redWeight;
+            });
+        }
+    } else if (algorithm === 'wu_polynomial' || algorithm === 'kiku_residual') {
+        // These use polynomial/residual refinement, but for visualization use bilinear pattern
+        if (centerCh === 'g') {
+            wG[1][1] = 1;
+            const leftCh = getChannel(gx - 1, gy);
+            const isRedRow = (leftCh === 'r' || getChannel(gx + 1, gy) === 'r');
+            if (isRedRow) {
+                wR[1][0] = 0.5; wR[1][2] = 0.5;
+                wB[0][1] = 0.5; wB[2][1] = 0.5;
+            } else {
+                wB[1][0] = 0.5; wB[1][2] = 0.5;
+                wR[0][1] = 0.5; wR[2][1] = 0.5;
+            }
+        } else if (centerCh === 'r') {
+            wR[1][1] = 1;
+            // Green: Cross average - only count actual green pixels
+            const greenCross = [
+                { x: -1, y: 0 }, { x: 1, y: 0 },
+                { x: 0, y: -1 }, { x: 0, y: 1 }
+            ].filter(pos => {
+                const px = gx + pos.x;
+                const py = gy + pos.y;
+                return px >= 0 && px < input.width && py >= 0 && py < input.height && getChannel(px, py) === 'g';
+            });
+            const greenWeight = greenCross.length > 0 ? 1.0 / greenCross.length : 0;
+            greenCross.forEach(pos => {
+                wG[1 + pos.y][1 + pos.x] = greenWeight;
+            });
+            // Blue: Only set weights at corners that are actually blue in the CFA
+            const blueCorners = [
+                { x: -1, y: -1 }, { x: 1, y: -1 },
+                { x: -1, y: 1 }, { x: 1, y: 1 }
+            ].filter(pos => {
+                const px = gx + pos.x;
+                const py = gy + pos.y;
+                return px >= 0 && px < input.width && py >= 0 && py < input.height && getChannel(px, py) === 'b';
+            });
+            const blueWeight = blueCorners.length > 0 ? 1.0 / blueCorners.length : 0;
+            blueCorners.forEach(pos => {
+                wB[1 + pos.y][1 + pos.x] = blueWeight;
+            });
+        } else {
+            wB[1][1] = 1;
+            // Green: Cross average - only count actual green pixels
+            const greenCross = [
+                { x: -1, y: 0 }, { x: 1, y: 0 },
+                { x: 0, y: -1 }, { x: 0, y: 1 }
+            ].filter(pos => {
+                const px = gx + pos.x;
+                const py = gy + pos.y;
+                return px >= 0 && px < input.width && py >= 0 && py < input.height && getChannel(px, py) === 'g';
+            });
+            const greenWeight = greenCross.length > 0 ? 1.0 / greenCross.length : 0;
+            greenCross.forEach(pos => {
+                wG[1 + pos.y][1 + pos.x] = greenWeight;
+            });
+            // Red: Only set weights at corners that are actually red in the CFA
+            const redCorners = [
+                { x: -1, y: -1 }, { x: 1, y: -1 },
+                { x: -1, y: 1 }, { x: 1, y: 1 }
+            ].filter(pos => {
+                const px = gx + pos.x;
+                const py = gy + pos.y;
+                return px >= 0 && px < input.width && py >= 0 && py < input.height && getChannel(px, py) === 'r';
+            });
+            const redWeight = redCorners.length > 0 ? 1.0 / redCorners.length : 0;
+            redCorners.forEach(pos => {
+                wR[1 + pos.y][1 + pos.x] = redWeight;
+            });
         }
     }
     
@@ -235,58 +1023,376 @@ export function InteractiveDemosaicVisualizer({
     const offset = Math.floor(kSize / 2);
     const visualizations = [];
     
-    const makeVis = (weights: number[][], title: string) => {
+    // Get channel function once (reuse it for consistency)
+    const getChannel = input.cfaPattern === 'bayer' 
+      ? getBayerKernel(input.cfaPatternMeta.layout) 
+      : input.cfaPattern === 'xtrans'
+      ? getXTransKernel()
+      : () => 'g';
+    
+    const makeVis = (weights: number[][], title: string, targetChannel: 'r' | 'g' | 'b') => {
         const cells = [];
         let totalR = 0, totalG = 0, totalB = 0;
         
         for (let y = 0; y < kSize; y++) {
             for (let x = 0; x < kSize; x++) {
                 const weight = weights[y][x];
+                // Only include cells with non-zero weights
+                if (Math.abs(weight) < 1e-6) continue;
+                
                 // Get pixel value from input
                 const gx = globalCursorX + (x - offset);
                 const gy = globalCursorY + (y - offset);
                 
                 let r = 0, g = 0, b = 0;
                 let label = "";
+                let ch: 'r' | 'g' | 'b' = 'g'; // Default
                 // Safely get mosaic value
                 if (gx >= 0 && gx < input.width && gy >= 0 && gy < input.height) {
                      const val = input.cfaData[gy * input.width + gx] * 255;
-                     const getChannel = input.cfaPattern === 'bayer' ? getBayerKernel(input.cfaPatternMeta.layout) : () => 'g';
-                     const ch = getChannel(gx, gy);
+                     const clampedVal = Math.max(0, Math.min(255, Math.round(val)));
+                     // Use the getChannel function defined above
+                     const channelResult = getChannel(gx, gy);
+                     ch = (channelResult === 'r' || channelResult === 'g' || channelResult === 'b') 
+                         ? channelResult 
+                         : 'g';
                      
-                     // Simplify Label for CFA
+                     // Set RGB values based on CFA channel - only the actual channel has value
                      if (ch === 'r') { 
-                         r = val; 
-                         label = `R: ${Math.round(val)}`;
+                         r = clampedVal; 
+                         g = 0;
+                         b = 0;
+                         label = `R: ${clampedVal}`;
                      }
                      else if (ch === 'g') { 
-                         g = val; 
-                         label = `G: ${Math.round(val)}`;
+                         r = 0;
+                         g = clampedVal; 
+                         b = 0;
+                         label = `G: ${clampedVal}`;
                      }
                      else { 
-                         b = val; 
-                         label = `B: ${Math.round(val)}`;
+                         r = 0;
+                         g = 0;
+                         b = clampedVal; 
+                         label = `B: ${clampedVal}`;
                      }
+                } else {
+                    // Out of bounds - keep r, g, b as 0
+                }
+                
+                // For channel reconstruction diagrams, only show pixels that match the target channel
+                // This ensures we only display the actual contributing pixels for each channel
+                if (targetChannel === 'r' && ch !== 'r') {
+                    continue; // Skip non-red pixels for red channel reconstruction
+                } else if (targetChannel === 'g' && ch !== 'g') {
+                    continue; // Skip non-green pixels for green channel reconstruction
+                } else if (targetChannel === 'b' && ch !== 'b') {
+                    continue; // Skip non-blue pixels for blue channel reconstruction
                 }
                 
                 cells.push({ r, g, b, weight, label });
-                if (weight > 0) {
+                
+                // Accumulate contributions based on the target channel being reconstructed
+                // The weight tells us how much this pixel contributes to the target channel
+                // Each pixel has a specific CFA channel (r, g, or b) which we use
+                if (targetChannel === 'r') {
+                    // For red reconstruction, only red pixels contribute to red
+                    // Green and blue pixels are shown but don't contribute to red channel output
                     totalR += r * weight;
+                } else if (targetChannel === 'g') {
+                    // For green reconstruction, only green pixels contribute to green
                     totalG += g * weight;
+                } else {
+                    // For blue reconstruction, only blue pixels contribute to blue
                     totalB += b * weight;
                 }
             }
         }
-        return { title, size: kSize, cells, totals: { r: totalR, g: totalG, b: totalB } };
+        
+        // Output should only show the contribution to the target channel
+        // Other channels should be 0 since this is a single-channel reconstruction
+        const totals = targetChannel === 'r' 
+            ? { r: totalR, g: 0, b: 0 }
+            : targetChannel === 'g'
+            ? { r: 0, g: totalG, b: 0 }
+            : { r: 0, g: 0, b: totalB };
+        
+        // Return filtered cells (only non-zero weights)
+        return { title, size: cells.length, cells, totals };
     };
     
-    visualizations.push(makeVis(wR, "Red Channel Reconstruction"));
-    visualizations.push(makeVis(wG, "Green Channel Reconstruction"));
-    visualizations.push(makeVis(wB, "Blue Channel Reconstruction"));
+    visualizations.push(makeVis(wR, "Red Channel Reconstruction", 'r'));
+    visualizations.push(makeVis(wG, "Green Channel Reconstruction", 'g'));
+    visualizations.push(makeVis(wB, "Blue Channel Reconstruction", 'b'));
     
     return visualizations;
   }, [kernels, globalCursorX, globalCursorY, input]);
 
+  // Compute which pixels contribute to each channel for arrow visualization
+  const contributingPixels = useMemo(() => {
+    const gx = globalCursorX;
+    const gy = globalCursorY;
+    const { width, height, cfaPatternMeta, cfaPattern } = input;
+    const getChannel = cfaPattern === 'bayer' 
+      ? getBayerKernel(cfaPatternMeta.layout) 
+      : cfaPattern === 'xtrans'
+      ? getXTransKernel()
+      : () => 'g';
+    
+    const centerCh = getChannel(gx, gy);
+    const getVal = (x: number, y: number) => {
+      if (x < 0 || x >= width || y < 0 || y >= height) return 0;
+      return input.cfaData[y * width + x];
+    };
+    
+    const rPixels: Array<{x: number, y: number}> = [];
+    const gPixels: Array<{x: number, y: number}> = [];
+    const bPixels: Array<{x: number, y: number}> = [];
+    
+    // Helper function to collect neighbors
+    const collectNeighbors = (targetColor: 'r' | 'g' | 'b', maxRadius: number = 10) => {
+        const result: Array<{x: number, y: number}> = [];
+        for (let dy = -maxRadius; dy <= maxRadius; dy++) {
+            for (let dx = -maxRadius; dx <= maxRadius; dx++) {
+                if (dx === 0 && dy === 0) continue;
+                const px = gx + dx;
+                const py = gy + dy;
+                if (px >= 0 && px < width && py >= 0 && py < height) {
+                    const ch = getChannel(px, py);
+                    if (ch === targetColor) {
+                        result.push({x: px, y: py});
+                    }
+                }
+            }
+        }
+        return result;
+    };
+    
+    // Add center pixel to appropriate channel
+    if (centerCh === 'r') rPixels.push({x: gx, y: gy});
+    else if (centerCh === 'g') gPixels.push({x: gx, y: gy});
+    else bPixels.push({x: gx, y: gy});
+    
+    if (algorithm === 'nearest') {
+      if (centerCh === 'r') {
+        // Find nearest G and B
+        for (let d = 1; d <= 10; d++) {
+          for (let dy = -d; dy <= d; dy++) {
+            for (let dx = -d; dx <= d; dx++) {
+              if (dx === 0 && dy === 0) continue;
+              const dist = Math.sqrt(dx * dx + dy * dy);
+              if (dist > d - 1 && dist <= d) {
+                const ch = getChannel(gx + dx, gy + dy);
+                if (ch === 'g' && gPixels.length === 0) {
+                  gPixels.push({x: gx + dx, y: gy + dy});
+                }
+                if (ch === 'b' && bPixels.length === 0) {
+                  bPixels.push({x: gx + dx, y: gy + dy});
+                }
+              }
+            }
+          }
+          if (gPixels.length > 0 && bPixels.length > 0) break;
+        }
+      } else if (centerCh === 'b') {
+        // Find nearest G and R
+        for (let d = 1; d <= 10; d++) {
+          for (let dy = -d; dy <= d; dy++) {
+            for (let dx = -d; dx <= d; dx++) {
+              if (dx === 0 && dy === 0) continue;
+              const dist = Math.sqrt(dx * dx + dy * dy);
+              if (dist > d - 1 && dist <= d) {
+                const ch = getChannel(gx + dx, gy + dy);
+                if (ch === 'g' && gPixels.length === 0) {
+                  gPixels.push({x: gx + dx, y: gy + dy});
+                }
+                if (ch === 'r' && rPixels.length === 0) {
+                  rPixels.push({x: gx + dx, y: gy + dy});
+                }
+              }
+            }
+          }
+          if (gPixels.length > 0 && rPixels.length > 0) break;
+        }
+      } else {
+        // Green pixel - find nearest R and B
+        for (let d = 1; d <= 10; d++) {
+          for (let dy = -d; dy <= d; dy++) {
+            for (let dx = -d; dx <= d; dx++) {
+              if (dx === 0 && dy === 0) continue;
+              const dist = Math.sqrt(dx * dx + dy * dy);
+              if (dist > d - 1 && dist <= d) {
+                const ch = getChannel(gx + dx, gy + dy);
+                if (ch === 'r' && rPixels.length === 0) {
+                  rPixels.push({x: gx + dx, y: gy + dy});
+                }
+                if (ch === 'b' && bPixels.length === 0) {
+                  bPixels.push({x: gx + dx, y: gy + dy});
+                }
+              }
+            }
+          }
+          if (rPixels.length > 0 && bPixels.length > 0) break;
+        }
+      }
+    } else if (algorithm === 'bilinear') {
+      // Use collectNeighbors with radius 1 to match actual implementation
+      if (centerCh === 'g') {
+        const rNeighbors = collectNeighbors('r', 1);
+        const bNeighbors = collectNeighbors('b', 1);
+        rPixels.push(...rNeighbors);
+        bPixels.push(...bNeighbors);
+      } else if (centerCh === 'r') {
+        const gNeighbors = collectNeighbors('g', 1);
+        const bNeighbors = collectNeighbors('b', 1);
+        gPixels.push(...gNeighbors);
+        bPixels.push(...bNeighbors);
+      } else { // Blue
+        const gNeighbors = collectNeighbors('g', 1);
+        const rNeighbors = collectNeighbors('r', 1);
+        gPixels.push(...gNeighbors);
+        rPixels.push(...rNeighbors);
+      }
+    } else if (algorithm === 'niu_edge_sensing') {
+      // X-Trans uses radius 2 (5x5), Bayer uses radius 1 (3x3)
+      const searchRadius = cfaPattern === 'xtrans' ? 2 : 1;
+      if (centerCh === 'r') {
+        if (cfaPattern === 'xtrans') {
+          // X-Trans: collect horizontal and vertical green neighbors separately, and all blue neighbors
+          const gNeighborsH = collectNeighbors('g', searchRadius).filter(p => p.y === gy);
+          const gNeighborsV = collectNeighbors('g', searchRadius).filter(p => p.x === gx);
+          const bNeighbors = collectNeighbors('b', searchRadius);
+          gPixels.push(...gNeighborsH, ...gNeighborsV);
+          bPixels.push(...bNeighbors);
+        } else {
+          // Bayer: use all green neighbors and corner blue neighbors
+          const gNeighbors = collectNeighbors('g', searchRadius);
+          const bCorners = collectNeighbors('b', searchRadius).filter(p => 
+            (p.x === gx - 1 || p.x === gx + 1) && (p.y === gy - 1 || p.y === gy + 1)
+          );
+          gPixels.push(...gNeighbors);
+          bPixels.push(...bCorners);
+        }
+      } else if (centerCh === 'b') {
+        if (cfaPattern === 'xtrans') {
+          // X-Trans: collect horizontal and vertical green neighbors separately, and all red neighbors
+          const gNeighborsH = collectNeighbors('g', searchRadius).filter(p => p.y === gy);
+          const gNeighborsV = collectNeighbors('g', searchRadius).filter(p => p.x === gx);
+          const rNeighbors = collectNeighbors('r', searchRadius);
+          gPixels.push(...gNeighborsH, ...gNeighborsV);
+          rPixels.push(...rNeighbors);
+        } else {
+          // Bayer: use all green neighbors and corner red neighbors
+          const gNeighbors = collectNeighbors('g', searchRadius);
+          const rCorners = collectNeighbors('r', searchRadius).filter(p => 
+            (p.x === gx - 1 || p.x === gx + 1) && (p.y === gy - 1 || p.y === gy + 1)
+          );
+          gPixels.push(...gNeighbors);
+          rPixels.push(...rCorners);
+        }
+      } else { // Green
+        if (cfaPattern === 'xtrans') {
+          // X-Trans: collect all red and blue neighbors in 5x5
+          const rNeighbors = collectNeighbors('r', searchRadius);
+          const bNeighbors = collectNeighbors('b', searchRadius);
+          rPixels.push(...rNeighbors);
+          bPixels.push(...bNeighbors);
+        } else {
+          // Bayer: use specific neighbors based on row type
+          const rNeighbors = collectNeighbors('r', searchRadius);
+          const bNeighbors = collectNeighbors('b', searchRadius);
+          const leftCh = getChannel(gx - 1, gy);
+          const isRedRow = (leftCh === 'r' || getChannel(gx + 1, gy) === 'r');
+          if (isRedRow) {
+            rPixels.push(...rNeighbors.filter(p => p.y === gy));
+            bPixels.push(...bNeighbors.filter(p => p.x === gx));
+          } else {
+            rPixels.push(...rNeighbors.filter(p => p.x === gx));
+            bPixels.push(...bNeighbors.filter(p => p.y === gy));
+          }
+        }
+      }
+    } else if (algorithm === 'lien_edge_based') {
+      // Use collectNeighbors with radius 1
+      if (centerCh === 'r') {
+        const gNeighbors = collectNeighbors('g', 1);
+        const bCorners = collectNeighbors('b', 1).filter(p => 
+          (p.x === gx - 1 || p.x === gx + 1) && (p.y === gy - 1 || p.y === gy + 1)
+        );
+        gPixels.push(...gNeighbors);
+        bPixels.push(...bCorners);
+      } else if (centerCh === 'b') {
+        const gNeighbors = collectNeighbors('g', 1);
+        const rCorners = collectNeighbors('r', 1).filter(p => 
+          (p.x === gx - 1 || p.x === gx + 1) && (p.y === gy - 1 || p.y === gy + 1)
+        );
+        gPixels.push(...gNeighbors);
+        rPixels.push(...rCorners);
+      } else { // Green
+        const rNeighbors = collectNeighbors('r', 1);
+        const bNeighbors = collectNeighbors('b', 1);
+        const leftCh = getChannel(gx - 1, gy);
+        const isRedRow = (leftCh === 'r' || getChannel(gx + 1, gy) === 'r');
+        if (isRedRow) {
+          rPixels.push(...rNeighbors.filter(p => p.y === gy));
+          bPixels.push(...bNeighbors.filter(p => p.x === gx));
+        } else {
+          rPixels.push(...rNeighbors.filter(p => p.x === gx));
+          bPixels.push(...bNeighbors.filter(p => p.y === gy));
+        }
+      }
+    } else if (algorithm === 'wu_polynomial') {
+      // Polynomial interpolation uses all neighbors within search radius (maxRadius = 5)
+      const maxRadius = 5;
+      if (centerCh === 'r') {
+        const gNeighbors = collectNeighbors('g', maxRadius);
+        const bNeighbors = collectNeighbors('b', maxRadius);
+        gPixels.push(...gNeighbors);
+        bPixels.push(...bNeighbors);
+      } else if (centerCh === 'b') {
+        const gNeighbors = collectNeighbors('g', maxRadius);
+        const rNeighbors = collectNeighbors('r', maxRadius);
+        gPixels.push(...gNeighbors);
+        rPixels.push(...rNeighbors);
+      } else { // Green
+        const rNeighbors = collectNeighbors('r', maxRadius);
+        const bNeighbors = collectNeighbors('b', maxRadius);
+        rPixels.push(...rNeighbors);
+        bPixels.push(...bNeighbors);
+      }
+    } else if (algorithm === 'kiku_residual') {
+      // Residual interpolation uses bilinear for initial estimate (radius 1)
+      if (centerCh === 'g') {
+        const rNeighbors = collectNeighbors('r', 1);
+        const bNeighbors = collectNeighbors('b', 1);
+        const leftCh = getChannel(gx - 1, gy);
+        const isRedRow = (leftCh === 'r' || getChannel(gx + 1, gy) === 'r');
+        if (isRedRow) {
+          rPixels.push(...rNeighbors.filter(p => p.y === gy));
+          bPixels.push(...bNeighbors.filter(p => p.x === gx));
+        } else {
+          rPixels.push(...rNeighbors.filter(p => p.x === gx));
+          bPixels.push(...bNeighbors.filter(p => p.y === gy));
+        }
+      } else if (centerCh === 'r') {
+        const gNeighbors = collectNeighbors('g', 1);
+        const bCorners = collectNeighbors('b', 1).filter(p => 
+          (p.x === gx - 1 || p.x === gx + 1) && (p.y === gy - 1 || p.y === gy + 1)
+        );
+        gPixels.push(...gNeighbors);
+        bPixels.push(...bCorners);
+      } else { // Blue
+        const gNeighbors = collectNeighbors('g', 1);
+        const rCorners = collectNeighbors('r', 1).filter(p => 
+          (p.x === gx - 1 || p.x === gx + 1) && (p.y === gy - 1 || p.y === gy + 1)
+        );
+        gPixels.push(...gNeighbors);
+        rPixels.push(...rCorners);
+      }
+    }
+    
+    return { rPixels, gPixels, bPixels };
+  }, [globalCursorX, globalCursorY, algorithm, input]);
 
   // Draw Canvases
   useEffect(() => {
@@ -294,13 +1400,19 @@ export function InteractiveDemosaicVisualizer({
          inputCanvasRef.current.width = REGION_SIZE;
          inputCanvasRef.current.height = REGION_SIZE;
          const ctx = inputCanvasRef.current.getContext('2d');
-         ctx?.putImageData(regionData.inputImageData, 0, 0);
+         if (ctx) {
+             ctx.imageSmoothingEnabled = false;
+             ctx.putImageData(regionData.inputImageData, 0, 0);
+         }
      }
      if (outputCanvasRef.current) {
          outputCanvasRef.current.width = REGION_SIZE;
          outputCanvasRef.current.height = REGION_SIZE;
          const ctx = outputCanvasRef.current.getContext('2d');
-         ctx?.putImageData(regionData.outputImageData, 0, 0);
+         if (ctx) {
+             ctx.imageSmoothingEnabled = false;
+             ctx.putImageData(regionData.outputImageData, 0, 0);
+         }
      }
   }, [regionData]);
 
@@ -333,26 +1445,98 @@ export function InteractiveDemosaicVisualizer({
          }
          ctx.stroke();
          
-         // Draw Selection Cursor
-         const kSize = kernels.kSize;
-         const offset = Math.floor(kSize / 2);
-         
-         // The cursor is at localCursorX, localCursorY.
-         // The Kernel window is centered there.
-         
          if (isInput) {
-             // Show Kernel Box
-             const kx = (localCursorX - offset) * scaleX;
-             const ky = (localCursorY - offset) * scaleY;
-             const kw = kSize * scaleX;
-             const kh = kSize * scaleY;
+             // Draw center pixel highlight
+             const centerX = localCursorX * scaleX + scaleX / 2;
+             const centerY = localCursorY * scaleY + scaleY / 2;
              
-             ctx.strokeStyle = "#ff0000";
+             // Draw arrows to contributing pixels
+             const drawArrow = (fromGlobalX: number, fromGlobalY: number, toGlobalX: number, toGlobalY: number, color: string) => {
+                 // Convert to local coordinates
+                 const fromLocalX = fromGlobalX - regionOriginX;
+                 const fromLocalY = fromGlobalY - regionOriginY;
+                 const toLocalX = toGlobalX - regionOriginX;
+                 const toLocalY = toGlobalY - regionOriginY;
+                 
+                 // Only draw if both pixels are within region bounds
+                 if (fromLocalX < 0 || fromLocalX >= REGION_SIZE || 
+                     fromLocalY < 0 || fromLocalY >= REGION_SIZE ||
+                     toLocalX < 0 || toLocalX >= REGION_SIZE || 
+                     toLocalY < 0 || toLocalY >= REGION_SIZE) {
+                     return;
+                 }
+                 
+                 const fx = fromLocalX * scaleX + scaleX / 2;
+                 const fy = fromLocalY * scaleY + scaleY / 2;
+                 const tx = toLocalX * scaleX + scaleX / 2;
+                 const ty = toLocalY * scaleY + scaleY / 2;
+                 
+                const angle = Math.atan2(ty - fy, tx - fx);
+                const arrowLength = Math.sqrt((tx - fx) ** 2 + (ty - fy) ** 2);
+                // Make arrowhead size proportional to pixel size, but cap it
+                const arrowHeadLength = Math.min(Math.max(scaleX * 0.4, 4), arrowLength * 0.4);
+                const arrowHeadAngle = Math.PI / 6;
+                
+                // Calculate where the arrowhead base should be (at the edge of target pixel)
+                const arrowHeadBaseX = tx - arrowHeadLength * Math.cos(angle);
+                const arrowHeadBaseY = ty - arrowHeadLength * Math.sin(angle);
+                
+                // Draw arrow line - extends all the way to the arrowhead base
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(fx, fy);
+                ctx.lineTo(arrowHeadBaseX, arrowHeadBaseY);
+                ctx.stroke();
+                
+                // Draw arrowhead at the target pixel center
+                ctx.fillStyle = color;
+                ctx.beginPath();
+                ctx.moveTo(tx, ty);
+                ctx.lineTo(
+                    tx - arrowHeadLength * Math.cos(angle - arrowHeadAngle),
+                    ty - arrowHeadLength * Math.sin(angle - arrowHeadAngle)
+                );
+                ctx.lineTo(
+                    tx - arrowHeadLength * Math.cos(angle + arrowHeadAngle),
+                    ty - arrowHeadLength * Math.sin(angle + arrowHeadAngle)
+                );
+                ctx.closePath();
+                ctx.fill();
+             };
+             
+             // Draw red arrows
+             contributingPixels.rPixels.forEach(pixel => {
+                 if (pixel.x !== globalCursorX || pixel.y !== globalCursorY) {
+                     drawArrow(globalCursorX, globalCursorY, pixel.x, pixel.y, '#ff0000');
+                 }
+             });
+             
+             // Draw green arrows
+             contributingPixels.gPixels.forEach(pixel => {
+                 if (pixel.x !== globalCursorX || pixel.y !== globalCursorY) {
+                     drawArrow(globalCursorX, globalCursorY, pixel.x, pixel.y, '#00ff00');
+                 }
+             });
+             
+             // Draw blue arrows
+             contributingPixels.bPixels.forEach(pixel => {
+                 if (pixel.x !== globalCursorX || pixel.y !== globalCursorY) {
+                     drawArrow(globalCursorX, globalCursorY, pixel.x, pixel.y, '#0000ff');
+                 }
+             });
+             
+             // Draw center pixel highlight
+             ctx.strokeStyle = "#ffffff";
              ctx.lineWidth = 2;
-             ctx.setLineDash([4, 2]);
-             ctx.strokeRect(kx, ky, kw, kh);
+             ctx.strokeRect(
+                 localCursorX * scaleX,
+                 localCursorY * scaleY,
+                 scaleX,
+                 scaleY
+             );
          } else {
-             // Show Single Pixel Highlight
+             // Output overlay: just show selected pixel
              const kx = localCursorX * scaleX;
              const ky = localCursorY * scaleY;
              ctx.strokeStyle = "#ff0000";
@@ -368,7 +1552,7 @@ export function InteractiveDemosaicVisualizer({
         drawOverlay(outputOverlayRef.current, false);
      });
      
-  }, [localCursorX, localCursorY, kernels]);
+  }, [localCursorX, localCursorY, contributingPixels, globalCursorX, globalCursorY, regionOriginX, regionOriginY]);
 
   // Mouse Handlers
   const getCoords = (e: React.MouseEvent) => {
@@ -398,6 +1582,1011 @@ export function InteractiveDemosaicVisualizer({
       }
   };
 
+  // Compute hyperparameters display
+  const hyperparameters = useMemo(() => {
+    const hyperparams: Array<{ label: string; value: string | number }> = [];
+    
+    if (algorithm === 'niu_edge_sensing') {
+      const threshold = params?.niuLogisticThreshold ?? 0.1;
+      hyperparams.push({ label: 'Edge Detection Threshold (θ)', value: threshold });
+      const k = params?.niuLogisticSteepness ?? (20.0 / Math.max(0.01, threshold));
+      hyperparams.push({ label: 'Logistic Steepness (k)', value: k.toFixed(2) });
+    } else if (algorithm === 'wu_polynomial') {
+      const degree = params?.wuPolynomialDegree ?? 2;
+      hyperparams.push({ label: 'Polynomial Degree', value: degree });
+    } else if (algorithm === 'kiku_residual') {
+      const iterations = params?.kikuResidualIterations ?? 1;
+      hyperparams.push({ label: 'Residual Iterations', value: iterations });
+    }
+    
+    return hyperparams;
+  }, [algorithm, params]);
+
+  // Compute detailed calculation breakdown for the selected pixel
+  const calculationBreakdown = useMemo(() => {
+    const gx = globalCursorX;
+    const gy = globalCursorY;
+    const { width, height, cfaPatternMeta, cfaPattern } = input;
+    const getChannel: (x: number, y: number) => 'r' | 'g' | 'b' = cfaPattern === 'bayer' 
+      ? getBayerKernel(cfaPatternMeta.layout) 
+      : cfaPattern === 'xtrans'
+      ? getXTransKernel()
+      : () => 'g' as const;
+    const getVal = (x: number, y: number) => {
+      let sx = x; 
+      if (sx < 0) sx = -sx; 
+      else if (sx >= width) sx = 2*width - 2 - sx;
+      let sy = y; 
+      if (sy < 0) sy = -sy; 
+      else if (sy >= height) sy = 2*height - 2 - sy;
+      sx = Math.max(0, Math.min(width - 1, sx));
+      sy = Math.max(0, Math.min(height - 1, sy));
+      return input.cfaData[sy * width + sx];
+    };
+    
+    const centerCh = getChannel(gx, gy);
+    const centerVal = getVal(gx, gy);
+    const breakdown: Array<{ step: string; description: string; formula?: string; result: string }> = [];
+    
+    // Convert to 0-255 range for display
+    const to255 = (val: number) => Math.round(val * 255);
+    
+    const centerRGB = centerCh === 'r' 
+      ? `(${to255(centerVal)}, 0, 0)`
+      : centerCh === 'g'
+      ? `(0, ${to255(centerVal)}, 0)`
+      : `(0, 0, ${to255(centerVal)})`;
+    breakdown.push({
+      step: '1. Raw Sensor Value',
+      description: `Pixel at (${gx}, ${gy}) has ${centerCh.toUpperCase()} channel`,
+      formula: `I_{sensor}(${gx}, ${gy}) = ${centerCh.toUpperCase()}`,
+      result: centerRGB
+    });
+    
+    // Helper function for collectNeighbors
+    const collectNeighbors = (targetColor: 'r' | 'g' | 'b', maxRadius: number = 10) => {
+        const result: { values: number[]; positions: Array<{x: number, y: number, val: number}> } = { values: [], positions: [] };
+        for (let dy = -maxRadius; dy <= maxRadius; dy++) {
+            for (let dx = -maxRadius; dx <= maxRadius; dx++) {
+                if (dx === 0 && dy === 0) continue;
+                const px = gx + dx;
+                const py = gy + dy;
+                if (px >= 0 && px < width && py >= 0 && py < height) {
+                    const ch = getChannel(px, py);
+                    if (ch === targetColor) {
+                        const val = getVal(px, py);
+                        result.values.push(val);
+                        result.positions.push({x: px, y: py, val});
+                    }
+                }
+            }
+        }
+        return result;
+    };
+    
+    // Compute RGB values using the same logic as regionData
+    let r = 0, g = 0, b = 0;
+    // Store neighbor data for breakdown display
+    let neighborData: {
+        rNeighbors?: Array<{x: number, y: number, val: number}>;
+        gNeighbors?: Array<{x: number, y: number, val: number}>;
+        bNeighbors?: Array<{x: number, y: number, val: number}>;
+    } = {};
+    
+    if (algorithm === 'nearest') {
+        // Find nearest neighbors using expanding search
+        if (centerCh === 'r') {
+            r = centerVal;
+            let gFound: {x: number, y: number, val: number} | null = null;
+            let bFound: {x: number, y: number, val: number} | null = null;
+            for (let d = 1; d <= 10; d++) {
+                for (let dy = -d; dy <= d; dy++) {
+                    for (let dx = -d; dx <= d; dx++) {
+                        if (dx === 0 && dy === 0) continue;
+                        const dist = Math.sqrt(dx * dx + dy * dy);
+                        if (dist > d - 1 && dist <= d) {
+                            const px = gx + dx;
+                            const py = gy + dy;
+                            if (px >= 0 && px < width && py >= 0 && py < height) {
+                                const nch = getChannel(px, py);
+                                const nval = getVal(px, py);
+                                if (nch === 'g' && !gFound) {
+                                    gFound = {x: px, y: py, val: nval};
+                                    g = nval;
+                                }
+                                if (nch === 'b' && !bFound) {
+                                    bFound = {x: px, y: py, val: nval};
+                                    b = nval;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (gFound && bFound) break;
+            }
+            if (gFound) neighborData.gNeighbors = [gFound];
+            if (bFound) neighborData.bNeighbors = [bFound];
+        } else if (centerCh === 'b') {
+            b = centerVal;
+            let gFound: {x: number, y: number, val: number} | null = null;
+            let rFound: {x: number, y: number, val: number} | null = null;
+            for (let d = 1; d <= 10; d++) {
+                for (let dy = -d; dy <= d; dy++) {
+                    for (let dx = -d; dx <= d; dx++) {
+                        if (dx === 0 && dy === 0) continue;
+                        const dist = Math.sqrt(dx * dx + dy * dy);
+                        if (dist > d - 1 && dist <= d) {
+                            const px = gx + dx;
+                            const py = gy + dy;
+                            if (px >= 0 && px < width && py >= 0 && py < height) {
+                                const nch = getChannel(px, py);
+                                const nval = getVal(px, py);
+                                if (nch === 'g' && !gFound) {
+                                    gFound = {x: px, y: py, val: nval};
+                                    g = nval;
+                                }
+                                if (nch === 'r' && !rFound) {
+                                    rFound = {x: px, y: py, val: nval};
+                                    r = nval;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (gFound && rFound) break;
+            }
+            if (gFound) neighborData.gNeighbors = [gFound];
+            if (rFound) neighborData.rNeighbors = [rFound];
+        } else {
+            g = centerVal;
+            let rFound: {x: number, y: number, val: number} | null = null;
+            let bFound: {x: number, y: number, val: number} | null = null;
+            for (let d = 1; d <= 10; d++) {
+                for (let dy = -d; dy <= d; dy++) {
+                    for (let dx = -d; dx <= d; dx++) {
+                        if (dx === 0 && dy === 0) continue;
+                        const dist = Math.sqrt(dx * dx + dy * dy);
+                        if (dist > d - 1 && dist <= d) {
+                            const px = gx + dx;
+                            const py = gy + dy;
+                            if (px >= 0 && px < width && py >= 0 && py < height) {
+                                const nch = getChannel(px, py);
+                                const nval = getVal(px, py);
+                                if (nch === 'r' && !rFound) {
+                                    rFound = {x: px, y: py, val: nval};
+                                    r = nval;
+                                }
+                                if (nch === 'b' && !bFound) {
+                                    bFound = {x: px, y: py, val: nval};
+                                    b = nval;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (rFound && bFound) break;
+            }
+            if (rFound) neighborData.rNeighbors = [rFound];
+            if (bFound) neighborData.bNeighbors = [bFound];
+        }
+    } else if (algorithm === 'bilinear') {
+        // Use collectNeighbors for actual implementation matching (radius 1)
+        if (centerCh === 'g') {
+            g = centerVal;
+            const rNeighbors = collectNeighbors('r', 1);
+            const bNeighbors = collectNeighbors('b', 1);
+            neighborData.rNeighbors = rNeighbors.positions;
+            neighborData.bNeighbors = bNeighbors.positions;
+            r = rNeighbors.values.length > 0 ? rNeighbors.values.reduce((a, b) => a + b, 0) / rNeighbors.values.length : 0;
+            b = bNeighbors.values.length > 0 ? bNeighbors.values.reduce((a, b) => a + b, 0) / bNeighbors.values.length : 0;
+        } else if (centerCh === 'r') {
+            r = centerVal;
+            const gNeighbors = collectNeighbors('g', 1);
+            const bNeighbors = collectNeighbors('b', 1);
+            neighborData.gNeighbors = gNeighbors.positions;
+            neighborData.bNeighbors = bNeighbors.positions;
+            g = gNeighbors.values.length > 0 ? gNeighbors.values.reduce((a, b) => a + b, 0) / gNeighbors.values.length : 0;
+            b = bNeighbors.values.length > 0 ? bNeighbors.values.reduce((a, b) => a + b, 0) / bNeighbors.values.length : 0;
+        } else {
+            b = centerVal;
+            const gNeighbors = collectNeighbors('g', 1);
+            const rNeighbors = collectNeighbors('r', 1);
+            neighborData.gNeighbors = gNeighbors.positions;
+            neighborData.rNeighbors = rNeighbors.positions;
+            g = gNeighbors.values.length > 0 ? gNeighbors.values.reduce((a, b) => a + b, 0) / gNeighbors.values.length : 0;
+            r = rNeighbors.values.length > 0 ? rNeighbors.values.reduce((a, b) => a + b, 0) / rNeighbors.values.length : 0;
+        }
+    } else if (algorithm === 'niu_edge_sensing') {
+        // X-Trans uses radius 2 (5x5), Bayer uses radius 1 (3x3)
+        const searchRadius = cfaPattern === 'xtrans' ? 2 : 1;
+        let greenInterp = 0;
+        if (centerCh === 'g') {
+            greenInterp = centerVal;
+        } else {
+            const threshold = params?.niuLogisticThreshold ?? 0.1;
+            const steepness = params?.niuLogisticSteepness;
+            const vars = computeDirectionalVariations(input.cfaData, width, height, gx, gy, getChannel, getVal);
+            const wH = logisticFunction(vars.horizontal, threshold, steepness);
+            const wV = logisticFunction(vars.vertical, threshold, steepness);
+            const sumW = wH + wV;
+            const nH = (sumW > 0) ? (1.0 - wH / sumW) : 0.5;
+            const nV = (sumW > 0) ? (1.0 - wV / sumW) : 0.5;
+            
+            if (cfaPattern === 'xtrans') {
+                // X-Trans: collect horizontal and vertical green neighbors separately
+                // Then use edge-aware weighting (nH, nV)
+                const greenH = collectNeighbors('g', searchRadius).positions.filter(p => p.y === gy);
+                const greenV = collectNeighbors('g', searchRadius).positions.filter(p => p.x === gx);
+                neighborData.gNeighbors = [...greenH, ...greenV];
+                const gH = greenH.length > 0 ? greenH.reduce((sum, p) => sum + p.val, 0) / greenH.length : 0;
+                const gV = greenV.length > 0 ? greenV.reduce((sum, p) => sum + p.val, 0) / greenV.length : 0;
+                greenInterp = (gH * nH + gV * nV) / (nH + nV);
+            } else {
+                // Bayer: use horizontal/vertical green neighbors only
+                const greenH = collectNeighbors('g', searchRadius).positions.filter(p => p.y === gy);
+                const greenV = collectNeighbors('g', searchRadius).positions.filter(p => p.x === gx);
+                neighborData.gNeighbors = [...greenH, ...greenV];
+                const gH = greenH.length > 0 ? greenH.reduce((sum, p) => sum + p.val, 0) / greenH.length : 0;
+                const gV = greenV.length > 0 ? greenV.reduce((sum, p) => sum + p.val, 0) / greenV.length : 0;
+                greenInterp = (gH * nH + gV * nV) / (nH + nV);
+            }
+        }
+        if (centerCh === 'r') {
+            r = centerVal;
+            g = greenInterp;
+            if (cfaPattern === 'xtrans') {
+                // X-Trans: collect all blue neighbors in 5x5 neighborhood
+                const bAll = collectNeighbors('b', searchRadius).positions;
+                neighborData.bNeighbors = bAll;
+                const bSum = bAll.reduce((sum, p) => sum + p.val, 0);
+                b = bAll.length > 0 ? bSum / bAll.length : g;
+            } else {
+                // Bayer: use corner blue neighbors only
+                const bCorners = collectNeighbors('b', searchRadius).positions.filter(p => 
+                    (p.x === gx - 1 || p.x === gx + 1) && (p.y === gy - 1 || p.y === gy + 1)
+                );
+                neighborData.bNeighbors = bCorners;
+                const bMinusG = bCorners.map(p => p.val - greenInterp);
+                const avgBMinusG = bMinusG.length > 0 ? bMinusG.reduce((a, b) => a + b, 0) / bMinusG.length : 0;
+                b = g + avgBMinusG;
+            }
+        } else if (centerCh === 'b') {
+            b = centerVal;
+            g = greenInterp;
+            if (cfaPattern === 'xtrans') {
+                // X-Trans: collect all red neighbors in 5x5 neighborhood
+                const rAll = collectNeighbors('r', searchRadius).positions;
+                neighborData.rNeighbors = rAll;
+                const rSum = rAll.reduce((sum, p) => sum + p.val, 0);
+                r = rAll.length > 0 ? rSum / rAll.length : g;
+            } else {
+                // Bayer: use corner red neighbors only
+                const rCorners = collectNeighbors('r', searchRadius).positions.filter(p => 
+                    (p.x === gx - 1 || p.x === gx + 1) && (p.y === gy - 1 || p.y === gy + 1)
+                );
+                neighborData.rNeighbors = rCorners;
+                const rMinusG = rCorners.map(p => p.val - greenInterp);
+                const avgRMinusG = rMinusG.length > 0 ? rMinusG.reduce((a, b) => a + b, 0) / rMinusG.length : 0;
+                r = g + avgRMinusG;
+            }
+        } else {
+            g = centerVal;
+            if (cfaPattern === 'xtrans') {
+                // X-Trans: collect all R/B neighbors in 5x5 neighborhood
+                const rAll = collectNeighbors('r', searchRadius).positions;
+                const bAll = collectNeighbors('b', searchRadius).positions;
+                neighborData.rNeighbors = rAll;
+                neighborData.bNeighbors = bAll;
+                const rSum = rAll.reduce((sum, p) => sum + p.val, 0);
+                const bSum = bAll.reduce((sum, p) => sum + p.val, 0);
+                r = rAll.length > 0 ? rSum / rAll.length : 0;
+                b = bAll.length > 0 ? bSum / bAll.length : 0;
+            } else {
+                // Bayer: use specific neighbors based on row type
+                const rNeighbors = collectNeighbors('r', searchRadius).positions;
+                const bNeighbors = collectNeighbors('b', searchRadius).positions;
+                const leftCh = getChannel(gx - 1, gy);
+                const isRedRow = (leftCh === 'r' || getChannel(gx + 1, gy) === 'r');
+                if (isRedRow) {
+                    neighborData.rNeighbors = rNeighbors.filter(p => p.y === gy);
+                    neighborData.bNeighbors = bNeighbors.filter(p => p.x === gx);
+                    const rVals = neighborData.rNeighbors.map(p => p.val);
+                    const bVals = neighborData.bNeighbors.map(p => p.val);
+                    r = rVals.length > 0 ? rVals.reduce((a, b) => a + b, 0) / rVals.length : 0;
+                    b = bVals.length > 0 ? bVals.reduce((a, b) => a + b, 0) / bVals.length : 0;
+                } else {
+                    neighborData.rNeighbors = rNeighbors.filter(p => p.x === gx);
+                    neighborData.bNeighbors = bNeighbors.filter(p => p.y === gy);
+                    const rVals = neighborData.rNeighbors.map(p => p.val);
+                    const bVals = neighborData.bNeighbors.map(p => p.val);
+                    r = rVals.length > 0 ? rVals.reduce((a, b) => a + b, 0) / rVals.length : 0;
+                    b = bVals.length > 0 ? bVals.reduce((a, b) => a + b, 0) / bVals.length : 0;
+                }
+            }
+        }
+    } else if (algorithm === 'lien_edge_based') {
+        // X-Trans uses radius 2 (5x5) for R/B when center is G, radius 1 for green when center is R/B
+        const searchRadiusRB = cfaPattern === 'xtrans' ? 2 : 1;
+        const searchRadiusG = 1; // Always use immediate neighbors for green interpolation
+        if (centerCh === 'g') {
+            g = centerVal;
+            const diffH = Math.abs(getVal(gx - 1, gy) - getVal(gx + 1, gy));
+            const diffV = Math.abs(getVal(gx, gy - 1) - getVal(gx, gy + 1));
+            const leftCh = getChannel(gx - 1, gy);
+            const isRedRow = (leftCh === 'r' || getChannel(gx + 1, gy) === 'r');
+            const rNeighbors = collectNeighbors('r', searchRadiusRB).positions;
+            const bNeighbors = collectNeighbors('b', searchRadiusRB).positions;
+            if (isRedRow) {
+                if (diffH < diffV) {
+                    neighborData.rNeighbors = rNeighbors.filter(p => p.y === gy);
+                    neighborData.bNeighbors = bNeighbors.filter(p => p.x === gx);
+                    const rVals = neighborData.rNeighbors.map(p => p.val);
+                    const bVals = neighborData.bNeighbors.map(p => p.val);
+                    r = rVals.length > 0 ? rVals.reduce((a, b) => a + b, 0) / rVals.length : 0;
+                    b = bVals.length > 0 ? bVals.reduce((a, b) => a + b, 0) / bVals.length : 0;
+                } else {
+                    neighborData.rNeighbors = rNeighbors.filter(p => p.x === gx);
+                    neighborData.bNeighbors = bNeighbors.filter(p => p.y === gy);
+                    const rVals = neighborData.rNeighbors.map(p => p.val);
+                    const bVals = neighborData.bNeighbors.map(p => p.val);
+                    r = rVals.length > 0 ? rVals.reduce((a, b) => a + b, 0) / rVals.length : 0;
+                    b = bVals.length > 0 ? bVals.reduce((a, b) => a + b, 0) / bVals.length : 0;
+                }
+            } else {
+                if (diffH < diffV) {
+                    neighborData.rNeighbors = rNeighbors.filter(p => p.x === gx);
+                    neighborData.bNeighbors = bNeighbors.filter(p => p.y === gy);
+                    const rVals = neighborData.rNeighbors.map(p => p.val);
+                    const bVals = neighborData.bNeighbors.map(p => p.val);
+                    r = rVals.length > 0 ? rVals.reduce((a, b) => a + b, 0) / rVals.length : 0;
+                    b = bVals.length > 0 ? bVals.reduce((a, b) => a + b, 0) / bVals.length : 0;
+                } else {
+                    neighborData.rNeighbors = rNeighbors.filter(p => p.y === gy);
+                    neighborData.bNeighbors = bNeighbors.filter(p => p.x === gx);
+                    const rVals = neighborData.rNeighbors.map(p => p.val);
+                    const bVals = neighborData.bNeighbors.map(p => p.val);
+                    r = rVals.length > 0 ? rVals.reduce((a, b) => a + b, 0) / rVals.length : 0;
+                    b = bVals.length > 0 ? bVals.reduce((a, b) => a + b, 0) / bVals.length : 0;
+                }
+            }
+        } else if (centerCh === 'r') {
+            r = centerVal;
+            const diffH = Math.abs(getVal(gx - 1, gy) - getVal(gx + 1, gy));
+            const diffV = Math.abs(getVal(gx, gy - 1) - getVal(gx, gy + 1));
+            const gNeighbors = collectNeighbors('g', searchRadiusG).positions;
+            if (cfaPattern === 'xtrans') {
+                // X-Trans: collect all blue neighbors in 5x5 neighborhood
+                const bAll = collectNeighbors('b', searchRadiusRB).positions;
+                neighborData.bNeighbors = bAll;
+                // For green, use edge-aware selection from immediate neighbors
+                if (diffH < diffV) {
+                    neighborData.gNeighbors = gNeighbors.filter(p => p.y === gy);
+                } else {
+                    neighborData.gNeighbors = gNeighbors.filter(p => p.x === gx);
+                }
+                const gVals = neighborData.gNeighbors.map(p => p.val);
+                g = gVals.length > 0 ? gVals.reduce((a, b) => a + b, 0) / gVals.length : 0;
+                const bSum = bAll.reduce((sum, p) => sum + p.val, 0);
+                b = bAll.length > 0 ? bSum / bAll.length : g;
+            } else {
+                // Bayer: use corner blue neighbors only
+                const bCorners = collectNeighbors('b', searchRadiusRB).positions.filter(p => 
+                    (p.x === gx - 1 || p.x === gx + 1) && (p.y === gy - 1 || p.y === gy + 1)
+                );
+                neighborData.bNeighbors = bCorners;
+                if (diffH < diffV) {
+                    neighborData.gNeighbors = gNeighbors.filter(p => p.y === gy);
+                } else {
+                    neighborData.gNeighbors = gNeighbors.filter(p => p.x === gx);
+                }
+                const gVals = neighborData.gNeighbors.map(p => p.val);
+                g = gVals.length > 0 ? gVals.reduce((a, b) => a + b, 0) / gVals.length : 0;
+                const avgB = bCorners.length > 0 ? bCorners.reduce((sum, p) => sum + p.val, 0) / bCorners.length : 0;
+                const avgG = gNeighbors.length > 0 ? gNeighbors.reduce((sum, p) => sum + p.val, 0) / gNeighbors.length : 0;
+                b = avgB + (g - avgG);
+            }
+        } else {
+            b = centerVal;
+            const diffH = Math.abs(getVal(gx - 1, gy) - getVal(gx + 1, gy));
+            const diffV = Math.abs(getVal(gx, gy - 1) - getVal(gx, gy + 1));
+            const gNeighbors = collectNeighbors('g', searchRadiusG).positions;
+            if (cfaPattern === 'xtrans') {
+                // X-Trans: collect all red neighbors in 5x5 neighborhood
+                const rAll = collectNeighbors('r', searchRadiusRB).positions;
+                neighborData.rNeighbors = rAll;
+                // For green, use edge-aware selection from immediate neighbors
+                if (diffH < diffV) {
+                    neighborData.gNeighbors = gNeighbors.filter(p => p.y === gy);
+                } else {
+                    neighborData.gNeighbors = gNeighbors.filter(p => p.x === gx);
+                }
+                const gVals = neighborData.gNeighbors.map(p => p.val);
+                g = gVals.length > 0 ? gVals.reduce((a, b) => a + b, 0) / gVals.length : 0;
+                const rSum = rAll.reduce((sum, p) => sum + p.val, 0);
+                r = rAll.length > 0 ? rSum / rAll.length : g;
+            } else {
+                // Bayer: use corner red neighbors only
+                const rCorners = collectNeighbors('r', searchRadiusRB).positions.filter(p => 
+                    (p.x === gx - 1 || p.x === gx + 1) && (p.y === gy - 1 || p.y === gy + 1)
+                );
+                neighborData.rNeighbors = rCorners;
+                if (diffH < diffV) {
+                    neighborData.gNeighbors = gNeighbors.filter(p => p.y === gy);
+                } else {
+                    neighborData.gNeighbors = gNeighbors.filter(p => p.x === gx);
+                }
+                const gVals = neighborData.gNeighbors.map(p => p.val);
+                g = gVals.length > 0 ? gVals.reduce((a, b) => a + b, 0) / gVals.length : 0;
+                const avgR = rCorners.length > 0 ? rCorners.reduce((sum, p) => sum + p.val, 0) / rCorners.length : 0;
+                const avgG = gNeighbors.length > 0 ? gNeighbors.reduce((sum, p) => sum + p.val, 0) / gNeighbors.length : 0;
+                r = avgR + (g - avgG);
+            }
+        }
+    } else if (algorithm === 'wu_polynomial') {
+        const degree = params?.wuPolynomialDegree ?? 2;
+        let greenInterp = 0;
+        if (centerCh === 'g') {
+            greenInterp = centerVal;
+        } else {
+            const gNeighbors = collectNeighbors('g', 5);
+            neighborData.gNeighbors = gNeighbors.positions;
+            if (gNeighbors.values.length > 0) {
+                // Calculate distances for polynomial interpolation
+                const distances = gNeighbors.positions.map(p => 
+                    Math.sqrt((p.x - gx) ** 2 + (p.y - gy) ** 2)
+                );
+                greenInterp = polynomialInterpolate(gNeighbors.values, distances, degree);
+            } else {
+                greenInterp = centerVal;
+            }
+        }
+        if (centerCh === 'r') {
+            r = centerVal;
+            g = greenInterp;
+            const bNeighbors = collectNeighbors('b', 5);
+            neighborData.bNeighbors = bNeighbors.positions;
+            if (bNeighbors.values.length > 0) {
+                const distances = bNeighbors.positions.map(p => 
+                    Math.sqrt((p.x - gx) ** 2 + (p.y - gy) ** 2)
+                );
+                b = polynomialInterpolate(bNeighbors.values, distances, degree);
+            } else {
+                b = g;
+            }
+        } else if (centerCh === 'b') {
+            b = centerVal;
+            g = greenInterp;
+            const rNeighbors = collectNeighbors('r', 5);
+            neighborData.rNeighbors = rNeighbors.positions;
+            if (rNeighbors.values.length > 0) {
+                const distances = rNeighbors.positions.map(p => 
+                    Math.sqrt((p.x - gx) ** 2 + (p.y - gy) ** 2)
+                );
+                r = polynomialInterpolate(rNeighbors.values, distances, degree);
+            } else {
+                r = g;
+            }
+        } else {
+            g = centerVal;
+            const rNeighbors = collectNeighbors('r', 5);
+            const bNeighbors = collectNeighbors('b', 5);
+            neighborData.rNeighbors = rNeighbors.positions;
+            neighborData.bNeighbors = bNeighbors.positions;
+            if (rNeighbors.values.length > 0) {
+                const distances = rNeighbors.positions.map(p => 
+                    Math.sqrt((p.x - gx) ** 2 + (p.y - gy) ** 2)
+                );
+                r = polynomialInterpolate(rNeighbors.values, distances, degree);
+            }
+            if (bNeighbors.values.length > 0) {
+                const distances = bNeighbors.positions.map(p => 
+                    Math.sqrt((p.x - gx) ** 2 + (p.y - gy) ** 2)
+                );
+                b = polynomialInterpolate(bNeighbors.values, distances, degree);
+            }
+        }
+    } else if (algorithm === 'kiku_residual') {
+        // Use bilinear collectNeighbors for initial estimate (radius 1)
+        if (centerCh === 'g') {
+            g = centerVal;
+            const rNeighbors = collectNeighbors('r', 1);
+            const bNeighbors = collectNeighbors('b', 1);
+            const leftCh = getChannel(gx - 1, gy);
+            const isRedRow = (leftCh === 'r' || getChannel(gx + 1, gy) === 'r');
+            if (isRedRow) {
+                neighborData.rNeighbors = rNeighbors.positions.filter(p => p.y === gy);
+                neighborData.bNeighbors = bNeighbors.positions.filter(p => p.x === gx);
+            } else {
+                neighborData.rNeighbors = rNeighbors.positions.filter(p => p.x === gx);
+                neighborData.bNeighbors = bNeighbors.positions.filter(p => p.y === gy);
+            }
+            const rVals = neighborData.rNeighbors.map(p => p.val);
+            const bVals = neighborData.bNeighbors.map(p => p.val);
+            r = rVals.length > 0 ? rVals.reduce((a, b) => a + b, 0) / rVals.length : 0;
+            b = bVals.length > 0 ? bVals.reduce((a, b) => a + b, 0) / bVals.length : 0;
+        } else if (centerCh === 'r') {
+            r = centerVal;
+            const gNeighbors = collectNeighbors('g', 1);
+            const bNeighbors = collectNeighbors('b', 1);
+            neighborData.gNeighbors = gNeighbors.positions;
+            neighborData.bNeighbors = bNeighbors.positions.filter(p => 
+                (p.x === gx - 1 || p.x === gx + 1) && (p.y === gy - 1 || p.y === gy + 1)
+            );
+            const gVals = neighborData.gNeighbors.map(p => p.val);
+            const bVals = neighborData.bNeighbors.map(p => p.val);
+            g = gVals.length > 0 ? gVals.reduce((a, b) => a + b, 0) / gVals.length : 0;
+            b = bVals.length > 0 ? bVals.reduce((a, b) => a + b, 0) / bVals.length : 0;
+        } else {
+            b = centerVal;
+            const gNeighbors = collectNeighbors('g', 1);
+            const rNeighbors = collectNeighbors('r', 1);
+            neighborData.gNeighbors = gNeighbors.positions;
+            neighborData.rNeighbors = rNeighbors.positions.filter(p => 
+                (p.x === gx - 1 || p.x === gx + 1) && (p.y === gy - 1 || p.y === gy + 1)
+            );
+            const gVals = neighborData.gNeighbors.map(p => p.val);
+            const rVals = neighborData.rNeighbors.map(p => p.val);
+            g = gVals.length > 0 ? gVals.reduce((a, b) => a + b, 0) / gVals.length : 0;
+            r = rVals.length > 0 ? rVals.reduce((a, b) => a + b, 0) / rVals.length : 0;
+        }
+    }
+    
+    if (algorithm === 'nearest') {
+      if (centerCh === 'r') {
+        if (neighborData.gNeighbors && neighborData.gNeighbors.length > 0) {
+          const gVals = neighborData.gNeighbors.map(n => to255(n.val));
+          breakdown.push({
+            step: '2. Find Nearest Green',
+            description: `Nearest green pixel`,
+            formula: `Ĝ = G(nearest)`,
+            result: `${gVals.map(v => `(0, ${v}, 0)`).join(', ')} → ${to255(g)}`
+          });
+        }
+        if (neighborData.bNeighbors && neighborData.bNeighbors.length > 0) {
+          const bVals = neighborData.bNeighbors.map(n => to255(n.val));
+          breakdown.push({
+            step: '3. Find Nearest Blue',
+            description: `Nearest blue pixel`,
+            formula: `B̂ = B(nearest)`,
+            result: `${bVals.map(v => `(0, 0, ${v})`).join(', ')} → ${to255(b)}`
+          });
+        }
+      } else if (centerCh === 'b') {
+        if (neighborData.gNeighbors && neighborData.gNeighbors.length > 0) {
+          const gVals = neighborData.gNeighbors.map(n => to255(n.val));
+          breakdown.push({
+            step: '2. Find Nearest Green',
+            description: `Nearest green pixel`,
+            formula: `Ĝ = G(nearest)`,
+            result: `${gVals.map(v => `(0, ${v}, 0)`).join(', ')} → ${to255(g)}`
+          });
+        }
+        if (neighborData.rNeighbors && neighborData.rNeighbors.length > 0) {
+          const rVals = neighborData.rNeighbors.map(n => to255(n.val));
+          breakdown.push({
+            step: '3. Find Nearest Red',
+            description: `Nearest red pixel`,
+            formula: `R̂ = R(nearest)`,
+            result: `${rVals.map(v => `(${v}, 0, 0)`).join(', ')} → ${to255(r)}`
+          });
+        }
+      } else {
+        if (neighborData.rNeighbors && neighborData.rNeighbors.length > 0) {
+          const rVals = neighborData.rNeighbors.map(n => to255(n.val));
+          breakdown.push({
+            step: '2. Find Nearest Red',
+            description: `Nearest red pixel`,
+            formula: `R̂ = R(nearest)`,
+            result: `${rVals.map(v => `(${v}, 0, 0)`).join(', ')} → ${to255(r)}`
+          });
+        }
+        if (neighborData.bNeighbors && neighborData.bNeighbors.length > 0) {
+          const bVals = neighborData.bNeighbors.map(n => to255(n.val));
+          breakdown.push({
+            step: '3. Find Nearest Blue',
+            description: `Nearest blue pixel`,
+            formula: `B̂ = B(nearest)`,
+            result: `${bVals.map(v => `(0, 0, ${v})`).join(', ')} → ${to255(b)}`
+          });
+        }
+      }
+    } else if (algorithm === 'bilinear') {
+      if (centerCh === 'g') {
+        if (neighborData.rNeighbors && neighborData.rNeighbors.length > 0) {
+          const rVals = neighborData.rNeighbors.map(n => to255(n.val));
+          const rSum = rVals.reduce((a, b) => a + b, 0);
+          breakdown.push({
+            step: '2. Interpolate Red',
+            description: `Average of ${neighborData.rNeighbors.length} red neighbor${neighborData.rNeighbors.length > 1 ? 's' : ''}`,
+            formula: `R̂ = (${rVals.join(' + ')}) / ${neighborData.rNeighbors.length}`,
+            result: `${rVals.map(v => `(${v}, 0, 0)`).join(', ')} → ${to255(r)}`
+          });
+        }
+        if (neighborData.bNeighbors && neighborData.bNeighbors.length > 0) {
+          const bVals = neighborData.bNeighbors.map(n => to255(n.val));
+          const bSum = bVals.reduce((a, b) => a + b, 0);
+          breakdown.push({
+            step: '3. Interpolate Blue',
+            description: `Average of ${neighborData.bNeighbors.length} blue neighbor${neighborData.bNeighbors.length > 1 ? 's' : ''}`,
+            formula: `B̂ = (${bVals.join(' + ')}) / ${neighborData.bNeighbors.length}`,
+            result: `${bVals.map(v => `(0, 0, ${v})`).join(', ')} → ${to255(b)}`
+          });
+        }
+      } else if (centerCh === 'r') {
+        if (neighborData.gNeighbors && neighborData.gNeighbors.length > 0) {
+          const gVals = neighborData.gNeighbors.map(n => to255(n.val));
+          breakdown.push({
+            step: '2. Interpolate Green',
+            description: `Average of ${neighborData.gNeighbors.length} green neighbor${neighborData.gNeighbors.length > 1 ? 's' : ''}`,
+            formula: `Ĝ = (${gVals.join(' + ')}) / ${neighborData.gNeighbors.length}`,
+            result: `${gVals.map(v => `(0, ${v}, 0)`).join(', ')} → ${to255(g)}`
+          });
+        }
+        if (neighborData.bNeighbors && neighborData.bNeighbors.length > 0) {
+          const bVals = neighborData.bNeighbors.map(n => to255(n.val));
+          breakdown.push({
+            step: '3. Interpolate Blue',
+            description: `Average of ${neighborData.bNeighbors.length} blue neighbor${neighborData.bNeighbors.length > 1 ? 's' : ''}`,
+            formula: `B̂ = (${bVals.join(' + ')}) / ${neighborData.bNeighbors.length}`,
+            result: `${bVals.map(v => `(0, 0, ${v})`).join(', ')} → ${to255(b)}`
+          });
+        }
+      } else { // Blue
+        if (neighborData.gNeighbors && neighborData.gNeighbors.length > 0) {
+          const gVals = neighborData.gNeighbors.map(n => to255(n.val));
+          breakdown.push({
+            step: '2. Interpolate Green',
+            description: `Average of ${neighborData.gNeighbors.length} green neighbor${neighborData.gNeighbors.length > 1 ? 's' : ''}`,
+            formula: `Ĝ = (${gVals.join(' + ')}) / ${neighborData.gNeighbors.length}`,
+            result: `${gVals.map(v => `(0, ${v}, 0)`).join(', ')} → ${to255(g)}`
+          });
+        }
+        if (neighborData.rNeighbors && neighborData.rNeighbors.length > 0) {
+          const rVals = neighborData.rNeighbors.map(n => to255(n.val));
+          breakdown.push({
+            step: '3. Interpolate Red',
+            description: `Average of ${neighborData.rNeighbors.length} red neighbor${neighborData.rNeighbors.length > 1 ? 's' : ''}`,
+            formula: `R̂ = (${rVals.join(' + ')}) / ${neighborData.rNeighbors.length}`,
+            result: `${rVals.map(v => `(${v}, 0, 0)`).join(', ')} → ${to255(r)}`
+          });
+        }
+      }
+    } else if (algorithm === 'niu_edge_sensing') {
+      const threshold = params?.niuLogisticThreshold ?? 0.1;
+      const steepness = params?.niuLogisticSteepness;
+      const vars = computeDirectionalVariations(input.cfaData, width, height, gx, gy, getChannel, getVal);
+      const wH = logisticFunction(vars.horizontal, threshold, steepness);
+      const wV = logisticFunction(vars.vertical, threshold, steepness);
+      
+      breakdown.push({
+        step: '2. Compute Directional Variations',
+        description: 'Measure edge strength in horizontal and vertical directions',
+        formula: `Δ_H = |I(${gx+1}, ${gy}) - I(${gx-1}, ${gy})|, Δ_V = |I(${gx}, ${gy+1}) - I(${gx}, ${gy-1})|`,
+        result: `Δ_H = ${vars.horizontal.toFixed(4)}, Δ_V = ${vars.vertical.toFixed(4)}`
+      });
+      
+      breakdown.push({
+        step: '3. Apply Logistic Function',
+        description: `Compute edge weights using threshold θ = ${threshold}`,
+        formula: `w = 1 / (1 + exp(-k(Δ - θ)))`,
+        result: `w_H = ${wH.toFixed(4)}, w_V = ${wV.toFixed(4)}`
+      });
+      
+      // Always show normalized edge weights after computing wH and wV
+      const sumW = wH + wV;
+      const nH = (sumW > 0) ? (1.0 - wH / sumW) : 0.5;
+      const nV = (sumW > 0) ? (1.0 - wV / sumW) : 0.5;
+      
+      breakdown.push({
+        step: '3a. Compute Normalized Edge Weights',
+        description: 'Normalize weights to favor direction with lower edge strength',
+        formula: `n_H = 1 - w_H/(w_H + w_V), n_V = 1 - w_V/(w_H + w_V)`,
+        result: `n_H = ${nH.toFixed(4)}, n_V = ${nV.toFixed(4)}`
+      });
+      
+      // Show green interpolation breakdown only when center is R or B (when we actually interpolate green)
+      if (neighborData.gNeighbors && neighborData.gNeighbors.length > 0 && (centerCh === 'r' || centerCh === 'b')) {
+        // Separate horizontal and vertical green neighbors
+        const greenH = neighborData.gNeighbors.filter(n => n.y === gy);
+        const greenV = neighborData.gNeighbors.filter(n => n.x === gx);
+        
+        // Only show breakdown if we have both horizontal and vertical neighbors
+        if (greenH.length > 0 || greenV.length > 0) {
+          const gHVals = greenH.map(n => to255(n.val));
+          const gVVals = greenV.map(n => to255(n.val));
+          const gH = greenH.length > 0 ? greenH.reduce((sum, n) => sum + n.val, 0) / greenH.length : 0;
+          const gV = greenV.length > 0 ? greenV.reduce((sum, n) => sum + n.val, 0) / greenV.length : 0;
+          const gInterp = (gH * nH + gV * nV) / (nH + nV);
+          
+          breakdown.push({
+            step: '4. Edge-Aware Green Interpolation',
+            description: `Weighted average: ${greenH.length} horizontal green neighbors × n_H + ${greenV.length} vertical green neighbors × n_V`,
+            formula: `Ĝ = (G_H × n_H + G_V × n_V) / (n_H + n_V)`,
+            result: `G_H = avg(${gHVals.length > 0 ? gHVals.map(v => `(0, ${v}, 0)`).join(', ') : 'none'}) = (0, ${to255(gH)}, 0), G_V = avg(${gVVals.length > 0 ? gVVals.map(v => `(0, ${v}, 0)`).join(', ') : 'none'}) = (0, ${to255(gV)}, 0) → Ĝ = (0, ${to255(gInterp)}, 0)`
+          });
+        }
+      }
+      if (neighborData.bNeighbors && neighborData.bNeighbors.length > 0 && centerCh === 'r') {
+        const bVals = neighborData.bNeighbors.map(n => to255(n.val));
+        const neighborType = cfaPattern === 'xtrans' ? 'blue neighbor' : 'blue corner neighbor';
+        breakdown.push({
+          step: '5. Interpolate Blue',
+          description: cfaPattern === 'xtrans' 
+            ? `Average of ${neighborData.bNeighbors.length} blue neighbors in 5×5 neighborhood`
+            : `Using ${neighborData.bNeighbors.length} blue corner neighbor${neighborData.bNeighbors.length > 1 ? 's' : ''} via color difference`,
+          formula: cfaPattern === 'xtrans' 
+            ? `B̂ = average(B_neighbors)`
+            : `B̂ = Ĝ + average(B - Ĝ)`,
+          result: `${bVals.map(v => `(0, 0, ${v})`).join(', ')} → ${to255(b)}`
+        });
+      }
+      if (neighborData.rNeighbors && neighborData.rNeighbors.length > 0 && centerCh === 'b') {
+        const rVals = neighborData.rNeighbors.map(n => to255(n.val));
+        breakdown.push({
+          step: '5. Interpolate Red',
+          description: cfaPattern === 'xtrans'
+            ? `Average of ${neighborData.rNeighbors.length} red neighbors in 5×5 neighborhood`
+            : `Using ${neighborData.rNeighbors.length} red corner neighbor${neighborData.rNeighbors.length > 1 ? 's' : ''} via color difference`,
+          formula: cfaPattern === 'xtrans'
+            ? `R̂ = average(R_neighbors)`
+            : `R̂ = Ĝ + average(R - Ĝ)`,
+          result: `${rVals.map(v => `(${v}, 0, 0)`).join(', ')} → ${to255(r)}`
+        });
+      }
+      if ((neighborData.rNeighbors || neighborData.bNeighbors) && centerCh === 'g') {
+        if (neighborData.rNeighbors && neighborData.rNeighbors.length > 0) {
+          const rVals = neighborData.rNeighbors.map(n => to255(n.val));
+          breakdown.push({
+            step: '2. Interpolate Red',
+            description: `Average of ${neighborData.rNeighbors.length} red neighbor${neighborData.rNeighbors.length > 1 ? 's' : ''}`,
+            formula: `R̂ = average(R_neighbors)`,
+            result: `${rVals.map(v => `(${v}, 0, 0)`).join(', ')} → ${to255(r)}`
+          });
+        }
+        if (neighborData.bNeighbors && neighborData.bNeighbors.length > 0) {
+          const bVals = neighborData.bNeighbors.map(n => to255(n.val));
+          breakdown.push({
+            step: '3. Interpolate Blue',
+            description: `Average of ${neighborData.bNeighbors.length} blue neighbor${neighborData.bNeighbors.length > 1 ? 's' : ''}`,
+            formula: `B̂ = average(B_neighbors)`,
+            result: `${bVals.map(v => `(0, 0, ${v})`).join(', ')} → ${to255(b)}`
+          });
+        }
+      }
+    } else if (algorithm === 'wu_polynomial') {
+      const degree = params?.wuPolynomialDegree ?? 2;
+      if (neighborData.gNeighbors && neighborData.gNeighbors.length > 0 && centerCh !== 'g') {
+        const gVals = neighborData.gNeighbors.map(n => to255(n.val));
+        breakdown.push({
+          step: '2. Polynomial Green Interpolation',
+          description: `Degree-${degree} polynomial interpolation using ${neighborData.gNeighbors.length} green neighbors`,
+          formula: `Ĝ = Σ(w_i × G_i) / Σ(w_i), where w_i = 1 / (1 + d_i^${degree})`,
+          result: `${gVals.map(v => `(0, ${v}, 0)`).join(', ')} → ${to255(g)}`
+        });
+      }
+      if (neighborData.bNeighbors && neighborData.bNeighbors.length > 0 && centerCh === 'r') {
+        const bVals = neighborData.bNeighbors.map(n => to255(n.val));
+        breakdown.push({
+          step: '3. Polynomial Blue Interpolation',
+          description: `Degree-${degree} polynomial interpolation using ${neighborData.bNeighbors.length} blue neighbors`,
+          formula: `B̂ = Σ(w_i × B_i) / Σ(w_i), where w_i = 1 / (1 + d_i^${degree})`,
+          result: `${bVals.map(v => `(0, 0, ${v})`).join(', ')} → ${to255(b)}`
+        });
+      }
+      if (neighborData.rNeighbors && neighborData.rNeighbors.length > 0 && centerCh === 'b') {
+        const rVals = neighborData.rNeighbors.map(n => to255(n.val));
+        breakdown.push({
+          step: '3. Polynomial Red Interpolation',
+          description: `Degree-${degree} polynomial interpolation using ${neighborData.rNeighbors.length} red neighbors`,
+          formula: `R̂ = Σ(w_i × R_i) / Σ(w_i), where w_i = 1 / (1 + d_i^${degree})`,
+          result: `${rVals.map(v => `(${v}, 0, 0)`).join(', ')} → ${to255(r)}`
+        });
+      }
+      if ((neighborData.rNeighbors || neighborData.bNeighbors) && centerCh === 'g') {
+        if (neighborData.rNeighbors && neighborData.rNeighbors.length > 0) {
+          const rVals = neighborData.rNeighbors.map(n => to255(n.val));
+          breakdown.push({
+            step: '2. Polynomial Red Interpolation',
+            description: `Degree-${degree} polynomial interpolation using ${neighborData.rNeighbors.length} red neighbors`,
+            formula: `R̂ = Σ(w_i × R_i) / Σ(w_i), where w_i = 1 / (1 + d_i^${degree})`,
+            result: `${rVals.map(v => `(${v}, 0, 0)`).join(', ')} → ${to255(r)}`
+          });
+        }
+        if (neighborData.bNeighbors && neighborData.bNeighbors.length > 0) {
+          const bVals = neighborData.bNeighbors.map(n => to255(n.val));
+          breakdown.push({
+            step: '3. Polynomial Blue Interpolation',
+            description: `Degree-${degree} polynomial interpolation using ${neighborData.bNeighbors.length} blue neighbors`,
+            formula: `B̂ = Σ(w_i × B_i) / Σ(w_i), where w_i = 1 / (1 + d_i^${degree})`,
+            result: `${bVals.map(v => `(0, 0, ${v})`).join(', ')} → ${to255(b)}`
+          });
+        }
+      }
+    } else if (algorithm === 'lien_edge_based') {
+      // Compute edge direction for all cases
+      const diffH = Math.abs(getVal(gx - 1, gy) - getVal(gx + 1, gy));
+      const diffV = Math.abs(getVal(gx, gy - 1) - getVal(gx, gy + 1));
+      const edgeDirection = diffH < diffV ? 'horizontal' : 'vertical';
+      const preferredDir = diffH < diffV ? 'H' : 'V';
+      
+      breakdown.push({
+        step: '2. Detect Edge Direction',
+        description: 'Compare horizontal and vertical intensity differences to determine edge orientation',
+        formula: `Δ_H = |I(${gx-1}, ${gy}) - I(${gx+1}, ${gy})|, Δ_V = |I(${gx}, ${gy-1}) - I(${gx}, ${gy+1})|`,
+        result: `Δ_H = ${diffH.toFixed(4)}, Δ_V = ${diffV.toFixed(4)} → Edge is ${edgeDirection} (use ${preferredDir} neighbors)`
+      });
+      
+      if (neighborData.gNeighbors && neighborData.gNeighbors.length > 0 && centerCh !== 'g') {
+        // Separate neighbors by direction
+        const gNeighborsH = neighborData.gNeighbors.filter(n => n.y === gy);
+        const gNeighborsV = neighborData.gNeighbors.filter(n => n.x === gx);
+        const usedNeighbors = diffH < diffV ? gNeighborsH : gNeighborsV;
+        const gVals = usedNeighbors.map(n => to255(n.val));
+        const avgG = usedNeighbors.length > 0 ? usedNeighbors.reduce((sum, n) => sum + n.val, 0) / usedNeighbors.length : 0;
+        
+        breakdown.push({
+          step: '3. Edge-Aware Green Interpolation',
+          description: `Use ${usedNeighbors.length} green neighbor${usedNeighbors.length > 1 ? 's' : ''} in ${edgeDirection} direction (lower variation)`,
+          formula: `Ĝ = average(G_neighbors in ${preferredDir} direction)`,
+          result: `${gVals.map(v => `(0, ${v}, 0)`).join(', ')} → (0, ${to255(avgG)}, 0)`
+        });
+      }
+      if (neighborData.bNeighbors && neighborData.bNeighbors.length > 0 && centerCh === 'r') {
+        const bVals = neighborData.bNeighbors.map(n => to255(n.val));
+        // For color difference, we need the average G from all 4 neighbors
+        const allGNeighbors = [
+          {x: gx-1, y: gy, val: getVal(gx-1, gy)},
+          {x: gx+1, y: gy, val: getVal(gx+1, gy)},
+          {x: gx, y: gy-1, val: getVal(gx, gy-1)},
+          {x: gx, y: gy+1, val: getVal(gx, gy+1)}
+        ].filter(n => getChannel(n.x, n.y) === 'g');
+        const avgGAll = allGNeighbors.length > 0 ? allGNeighbors.reduce((sum, n) => sum + n.val, 0) / allGNeighbors.length : g;
+        const bMinusG = neighborData.bNeighbors.map(n => n.val - avgGAll);
+        const avgBMinusG = bMinusG.reduce((a, b) => a + b, 0) / bMinusG.length;
+        const finalB = g + avgBMinusG;
+        
+        breakdown.push({
+          step: '4. Interpolate Blue via Color Difference',
+          description: `Using ${neighborData.bNeighbors.length} blue corner neighbor${neighborData.bNeighbors.length > 1 ? 's' : ''} and color difference assumption`,
+          formula: `B̂ = Ĝ + average(B_i - G_avg)`,
+          result: `B_i: ${bVals.map(v => `(0, 0, ${v})`).join(', ')}, G_avg = ${to255(avgGAll)}, B-G: ${bMinusG.map(v => to255(v)).join(', ')} → B̂ = ${to255(finalB)}`
+        });
+      }
+      if (neighborData.rNeighbors && neighborData.rNeighbors.length > 0 && centerCh === 'b') {
+        const rVals = neighborData.rNeighbors.map(n => to255(n.val));
+        // For color difference, we need the average G from all 4 neighbors
+        const allGNeighbors = [
+          {x: gx-1, y: gy, val: getVal(gx-1, gy)},
+          {x: gx+1, y: gy, val: getVal(gx+1, gy)},
+          {x: gx, y: gy-1, val: getVal(gx, gy-1)},
+          {x: gx, y: gy+1, val: getVal(gx, gy+1)}
+        ].filter(n => getChannel(n.x, n.y) === 'g');
+        const avgGAll = allGNeighbors.length > 0 ? allGNeighbors.reduce((sum, n) => sum + n.val, 0) / allGNeighbors.length : g;
+        const rMinusG = neighborData.rNeighbors.map(n => n.val - avgGAll);
+        const avgRMinusG = rMinusG.reduce((a, b) => a + b, 0) / rMinusG.length;
+        const finalR = g + avgRMinusG;
+        
+        breakdown.push({
+          step: '4. Interpolate Red via Color Difference',
+          description: `Using ${neighborData.rNeighbors.length} red corner neighbor${neighborData.rNeighbors.length > 1 ? 's' : ''} and color difference assumption`,
+          formula: `R̂ = Ĝ + average(R_i - G_avg)`,
+          result: `R_i: ${rVals.map(v => `(${v}, 0, 0)`).join(', ')}, G_avg = ${to255(avgGAll)}, R-G: ${rMinusG.map(v => to255(v)).join(', ')} → R̂ = ${to255(finalR)}`
+        });
+      }
+      if ((neighborData.rNeighbors || neighborData.bNeighbors) && centerCh === 'g') {
+        const leftCh = getChannel(gx - 1, gy);
+        const isRedRow = (leftCh === 'r' || getChannel(gx + 1, gy) === 'r');
+        
+        if (neighborData.rNeighbors && neighborData.rNeighbors.length > 0) {
+          // Separate R neighbors by direction based on edge and row type
+          const rNeighborsH = neighborData.rNeighbors.filter(n => n.y === gy);
+          const rNeighborsV = neighborData.rNeighbors.filter(n => n.x === gx);
+          let usedRNeighbors: Array<{x: number, y: number, val: number}> = [];
+          if (isRedRow) {
+            usedRNeighbors = diffH < diffV ? rNeighborsH : rNeighborsV;
+          } else {
+            usedRNeighbors = diffH < diffV ? rNeighborsV : rNeighborsH;
+          }
+          const rVals = usedRNeighbors.map(n => to255(n.val));
+          const avgR = usedRNeighbors.length > 0 ? usedRNeighbors.reduce((sum, n) => sum + n.val, 0) / usedRNeighbors.length : 0;
+          
+          breakdown.push({
+            step: '3. Edge-Aware Red Interpolation',
+            description: `Use ${usedRNeighbors.length} red neighbor${usedRNeighbors.length > 1 ? 's' : ''} in ${edgeDirection} direction (${isRedRow ? 'red' : 'blue'} row)`,
+            formula: `R̂ = average(R_neighbors in preferred direction)`,
+            result: `${rVals.map(v => `(${v}, 0, 0)`).join(', ')} → (${to255(avgR)}, 0, 0)`
+          });
+        }
+        if (neighborData.bNeighbors && neighborData.bNeighbors.length > 0) {
+          // Separate B neighbors by direction based on edge and row type
+          const bNeighborsH = neighborData.bNeighbors.filter(n => n.y === gy);
+          const bNeighborsV = neighborData.bNeighbors.filter(n => n.x === gx);
+          let usedBNeighbors: Array<{x: number, y: number, val: number}> = [];
+          if (isRedRow) {
+            usedBNeighbors = diffH < diffV ? bNeighborsV : bNeighborsH;
+          } else {
+            usedBNeighbors = diffH < diffV ? bNeighborsH : bNeighborsV;
+          }
+          const bVals = usedBNeighbors.map(n => to255(n.val));
+          const avgB = usedBNeighbors.length > 0 ? usedBNeighbors.reduce((sum, n) => sum + n.val, 0) / usedBNeighbors.length : 0;
+          
+          breakdown.push({
+            step: '4. Edge-Aware Blue Interpolation',
+            description: `Use ${usedBNeighbors.length} blue neighbor${usedBNeighbors.length > 1 ? 's' : ''} in ${edgeDirection === 'horizontal' ? 'vertical' : 'horizontal'} direction (${isRedRow ? 'red' : 'blue'} row)`,
+            formula: `B̂ = average(B_neighbors in preferred direction)`,
+            result: `${bVals.map(v => `(0, 0, ${v})`).join(', ')} → (0, 0, ${to255(avgB)})`
+          });
+        }
+      }
+    } else if (algorithm === 'kiku_residual') {
+      const iterations = params?.kikuResidualIterations ?? 1;
+      if (neighborData.gNeighbors && neighborData.gNeighbors.length > 0 && centerCh !== 'g') {
+        const gVals = neighborData.gNeighbors.map(n => to255(n.val));
+        breakdown.push({
+          step: '2. Initial Bilinear Green Estimate',
+          description: `Bilinear interpolation using ${neighborData.gNeighbors.length} green neighbor${neighborData.gNeighbors.length > 1 ? 's' : ''}`,
+          formula: 'Ĝ₀ = Bilinear(G_neighbors)',
+          result: `${gVals.map(v => `(0, ${v}, 0)`).join(', ')} → ${to255(g)}`
+        });
+      }
+      if (neighborData.bNeighbors && neighborData.bNeighbors.length > 0 && centerCh === 'r') {
+        const bVals = neighborData.bNeighbors.map(n => to255(n.val));
+        breakdown.push({
+          step: '3. Initial Bilinear Blue Estimate',
+          description: `Bilinear interpolation using ${neighborData.bNeighbors.length} blue neighbor${neighborData.bNeighbors.length > 1 ? 's' : ''}`,
+          formula: 'B̂₀ = Bilinear(B_neighbors)',
+          result: `${bVals.map(v => `(0, 0, ${v})`).join(', ')} → ${to255(b)}`
+        });
+      }
+      if (neighborData.rNeighbors && neighborData.rNeighbors.length > 0 && centerCh === 'b') {
+        const rVals = neighborData.rNeighbors.map(n => to255(n.val));
+        breakdown.push({
+          step: '3. Initial Bilinear Red Estimate',
+          description: `Bilinear interpolation using ${neighborData.rNeighbors.length} red neighbor${neighborData.rNeighbors.length > 1 ? 's' : ''}`,
+          formula: 'R̂₀ = Bilinear(R_neighbors)',
+          result: `${rVals.map(v => `(${v}, 0, 0)`).join(', ')} → ${to255(r)}`
+        });
+      }
+      if ((neighborData.rNeighbors || neighborData.bNeighbors) && centerCh === 'g') {
+        if (neighborData.rNeighbors && neighborData.rNeighbors.length > 0) {
+          const rVals = neighborData.rNeighbors.map(n => to255(n.val));
+          breakdown.push({
+            step: '2. Initial Bilinear Red Estimate',
+            description: `Bilinear interpolation using ${neighborData.rNeighbors.length} red neighbor${neighborData.rNeighbors.length > 1 ? 's' : ''}`,
+            formula: 'R̂₀ = Bilinear(R_neighbors)',
+            result: `${rVals.map(v => `(${v}, 0, 0)`).join(', ')} → ${to255(r)}`
+          });
+        }
+        if (neighborData.bNeighbors && neighborData.bNeighbors.length > 0) {
+          const bVals = neighborData.bNeighbors.map(n => to255(n.val));
+          breakdown.push({
+            step: '3. Initial Bilinear Blue Estimate',
+            description: `Bilinear interpolation using ${neighborData.bNeighbors.length} blue neighbor${neighborData.bNeighbors.length > 1 ? 's' : ''}`,
+            formula: 'B̂₀ = Bilinear(B_neighbors)',
+            result: `${bVals.map(v => `(0, 0, ${v})`).join(', ')} → ${to255(b)}`
+          });
+        }
+      }
+      if (iterations > 1) {
+        breakdown.push({
+          step: '4. Residual Interpolation',
+          description: `Interpolate residuals for ${iterations - 1} additional iteration(s)`,
+          formula: 'R = I_observed - Î₀, then Î = Î₀ + Interp(R)',
+          result: `Refined estimate after ${iterations} total iteration(s)`
+        });
+      }
+    }
+    
+    breakdown.push({
+      step: 'Final RGB',
+      description: 'Final reconstructed color values',
+      formula: `RGB(${gx}, ${gy})`,
+      result: `(${to255(r)}, ${to255(g)}, ${to255(b)})`
+    });
+    
+    return breakdown;
+  }, [globalCursorX, globalCursorY, algorithm, params, input]);
+
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-4">
@@ -424,19 +2613,40 @@ export function InteractiveDemosaicVisualizer({
          </div>
       </div>
       
-      <div className="space-y-4">
-         <div className="text-xs text-muted-foreground">
-             The diagrams below show the contribution of neighboring pixels to the final RGB value (Raw CFA Value × Weight). Unused pixels are dimmed.
-         </div>
-         {kernelVisualizations.map(vis => (
-             <KernelMultiplicationDiagram
-                key={vis.title}
-                title={vis.title}
-                size={vis.size}
-                cells={vis.cells}
-                totals={vis.totals}
-             />
-         ))}
+      {/* Hyperparameters Section */}
+      {hyperparameters.length > 0 && (
+        <div className="bg-muted/30 p-3 rounded-md border border-border/50">
+          <div className="text-xs font-semibold text-primary mb-2">Algorithm Hyperparameters</div>
+          <div className="space-y-1">
+            {hyperparameters.map((param, idx) => (
+              <div key={idx} className="flex justify-between items-center text-xs">
+                <span className="text-muted-foreground">{param.label}:</span>
+                <span className="font-mono font-medium">{param.value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      
+      {/* Calculation Breakdown Section */}
+      <div className="bg-muted/30 p-3 rounded-md border border-border/50">
+        <div className="text-xs font-semibold text-primary mb-2">Full Calculation for Pixel ({globalCursorX}, {globalCursorY})</div>
+        <div className="space-y-3">
+          {calculationBreakdown.map((step, idx) => (
+            <div key={idx} className="space-y-1">
+              <div className="text-xs font-medium text-foreground">{step.step}</div>
+              <div className="text-[11px] text-muted-foreground">{step.description}</div>
+              {step.formula && (
+                <div className="text-[10px] font-mono bg-background/50 px-2 py-1 rounded border border-border/30">
+                  {step.formula}
+                </div>
+              )}
+              <div className="text-[11px] font-mono text-primary font-medium">
+                = {step.result}
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );

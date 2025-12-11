@@ -101,6 +101,17 @@ export function BenchmarkCharts({ results }: BenchmarkChartsProps) {
     }));
   }, [results]);
 
+  // Calculate min and max SSIM for axis domain
+  const ssimDomain = useMemo(() => {
+    if (qualityByAlgorithm.length === 0) return [0, 1];
+    const ssimValues = qualityByAlgorithm.map(d => d.avgSSIM).filter(v => v > 0);
+    if (ssimValues.length === 0) return [0, 1];
+    const min = Math.min(...ssimValues);
+    const max = Math.max(...ssimValues);
+    const padding = (max - min) * 0.1; // 10% padding
+    return [Math.max(0, min - padding), Math.min(1, max + padding)];
+  }, [qualityByAlgorithm]);
+
   // Scatter plot data: time vs quality with image name for shape encoding
   const timeVsQuality = useMemo(() => {
     return results
@@ -245,7 +256,10 @@ export function BenchmarkCharts({ results }: BenchmarkChartsProps) {
                 <BarChart data={qualityByAlgorithm}>
                   <CartesianGrid strokeDasharray="3 3" />
                   <XAxis dataKey="algorithm" />
-                  <YAxis label={{ value: 'SSIM', angle: -90, position: 'insideLeft' }} />
+                  <YAxis 
+                    label={{ value: 'SSIM', angle: -90, position: 'insideLeft' }}
+                    domain={ssimDomain}
+                  />
                   <Tooltip />
                   <Legend />
                   <Bar dataKey="avgSSIM" fill="#82ca9d" name="Avg SSIM" />

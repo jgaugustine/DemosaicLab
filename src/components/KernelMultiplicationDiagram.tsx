@@ -41,10 +41,13 @@ export const KernelMultiplicationDiagram: React.FC<KernelMultiplicationDiagramPr
     highlightColor &&
     `rgba(${highlightColor.r}, ${highlightColor.g}, ${highlightColor.b}, 0.15)`;
 
+  // Use flex layout if we have fewer cells (filtered), grid otherwise
+  const useFlex = cells.length < size * size;
+
   return (
     <div className="space-y-2 w-full">
       <div className="text-xs font-semibold text-foreground">{title}</div>
-      <div className="grid gap-2 w-full" style={gridTemplate}>
+      <div className={useFlex ? "flex flex-wrap gap-2 w-full" : "grid gap-2 w-full"} style={useFlex ? {} : gridTemplate}>
         {cells.map((cell, idx) => {
           const isZeroWeight = Math.abs(cell.weight) < 1e-6;
           return (

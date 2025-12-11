@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { HelpTooltip } from '@/components/ui/HelpTooltip';
-import { DemosaicAlgorithm, CFAType, PixelTraceStep, DemosaicInput, ErrorStats } from '@/types/demosaic';
+import { DemosaicAlgorithm, CFAType, DemosaicInput, ErrorStats, DemosaicParams } from '@/types/demosaic';
 import 'katex/dist/katex.min.css';
 import { InlineMath, BlockMath } from 'react-katex';
 import { InteractiveDemosaicVisualizer } from './InteractiveDemosaicVisualizer';
@@ -12,7 +12,6 @@ import { computeLaplacianMagnitude, normalizeScalarField, heatmapFromNormalizedF
 interface MathPanelProps {
   cfaType: CFAType;
   algorithm: DemosaicAlgorithm;
-  trace?: PixelTraceStep[];
   x?: number;
   y?: number;
   error?: {
@@ -22,6 +21,7 @@ interface MathPanelProps {
   errorStats?: ErrorStats | null;
   input?: DemosaicInput | null;
   syntheticType?: string | null;
+  params?: DemosaicParams;
 }
 
 interface ScalarFieldHeatmapProps {
@@ -291,13 +291,13 @@ const SYNTHETIC_EXPLANATIONS: Record<string, {
 export function DemosaicMathExplanation({ 
   cfaType, 
   algorithm, 
-  trace,
   x,
   y,
   error,
   errorStats,
   input,
-  syntheticType
+  syntheticType,
+  params
 }: MathPanelProps) {
   const laplacianField = useMemo(() => {
     if (!input?.groundTruthRGB) return undefined;
@@ -318,9 +318,8 @@ export function DemosaicMathExplanation({
       </CardHeader>
       <CardContent className="flex-1 overflow-hidden flex flex-col px-3 sm:px-4">
         <Tabs defaultValue="visualizer" className="w-full flex flex-col h-full">
-          <TabsList className="grid w-full grid-cols-2 md:grid-cols-4 h-auto mb-4 shrink-0">
+          <TabsList className="grid w-full grid-cols-2 md:grid-cols-3 h-auto mb-4 shrink-0">
             <TabsTrigger value="visualizer">Visualizer</TabsTrigger>
-            <TabsTrigger value="trace">Pixel Trace</TabsTrigger>
             <TabsTrigger value="algo">Algorithm Info</TabsTrigger>
             <TabsTrigger value="error">Error Analysis</TabsTrigger>
           </TabsList>
@@ -332,6 +331,7 @@ export function DemosaicMathExplanation({
                     centerX={x}
                     centerY={y}
                     algorithm={algorithm}
+                    params={params}
                  />
              ) : (
                 <div className="flex flex-col items-center justify-center h-[300px] text-center p-6 border-2 border-dashed border-muted rounded-lg bg-muted/10">
@@ -463,116 +463,7 @@ export function DemosaicMathExplanation({
                     )}
                  </div>
               </div>
-              
-              {cfaType === 'bayer' && (
-                <div className="mt-4">
-                   <div className="text-xs font-medium mb-2 text-center">Bayer (RGGB) Unit Cell</div>
-                   <div className="grid grid-cols-2 gap-1 w-24 h-24 mx-auto">
-                      <div className="bg-red-500/20 text-red-500 flex items-center justify-center font-bold border border-red-500/50 rounded"><InlineMath math="R_{00}" /></div>
-                      <div className="bg-green-500/20 text-green-500 flex items-center justify-center font-bold border border-green-500/50 rounded"><InlineMath math="G_{01}" /></div>
-                      <div className="bg-green-500/20 text-green-500 flex items-center justify-center font-bold border border-green-500/50 rounded"><InlineMath math="G_{10}" /></div>
-                      <div className="bg-blue-500/20 text-blue-500 flex items-center justify-center font-bold border border-blue-500/50 rounded"><InlineMath math="B_{11}" /></div>
-                   </div>
-                </div>
-              )}
             </div>
-          </TabsContent>
-          
-          <TabsContent value="trace" className="space-y-4 animate-in fade-in-50 overflow-y-auto pr-1 flex-1">
-            {trace && x !== undefined && y !== undefined && x >= 0 ? (
-              <div className="space-y-4 pb-4">
-                {/* Header with Coords & Error */}
-                <div className="flex items-center justify-between bg-muted/40 p-2 rounded-md border border-border sticky top-0 z-10 backdrop-blur-sm bg-background/80">
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-primary"></div>
-                    <div className="flex items-center gap-1">
-                      <span className="font-mono text-sm font-medium">Pixel ({x}, {y})</span>
-                      <HelpTooltip className="h-3 w-3" content={`Coordinates of the currently selected pixel. x=${x}, y=${y}.`} />
-                    </div>
-                  </div>
-                  {error ? (
-                     <div className="flex flex-col items-end">
-                        <span className="text-[10px] uppercase tracking-wider text-muted-foreground flex items-center gap-1">
-                          L2 Error
-                          <HelpTooltip className="h-3 w-3" content="L2 Error (Euclidean distance) measures the accuracy of the reconstruction. It is the distance between the reconstructed RGB vector and the original ground truth RGB vector. Lower is better." />
-                        </span>
-                        <span className={`font-mono text-sm font-bold ${error.l2 > 0.1 ? 'text-red-500' : 'text-green-500'}`}>
-                          {error.l2.toFixed(4)}
-                        </span>
-                     </div>
-                  ) : (
-                     <div className="flex items-center gap-1">
-                        <span className="text-xs text-muted-foreground px-2 py-1 bg-muted rounded">No Ground Truth</span>
-                        <HelpTooltip className="h-3 w-3" content="We don't have the original full-color image to compare against (e.g. when using a real RAW file), so we can't calculate error." />
-                     </div>
-                  )}
-                </div>
-                
-                {/* Trace Steps Timeline */}
-                <div className="space-y-3 relative before:absolute before:left-[15px] before:top-2 before:bottom-2 before:w-[2px] before:bg-border">
-                  {trace.map((step, i) => (
-                    <div key={i} className="relative pl-8">
-                      {/* Timeline Dot */}
-                      <div className="absolute left-[11px] top-1.5 w-[10px] h-[10px] rounded-full bg-background border-2 border-primary z-10"></div>
-                      
-                      <div className="bg-card border border-border rounded-md overflow-hidden shadow-sm">
-                        <div className="bg-muted/30 px-3 py-2 border-b border-border/50">
-                          <div className="text-xs font-semibold text-primary">{step.description}</div>
-                          {step.formula && (
-                            <div className="text-[10px] text-muted-foreground mt-1 overflow-x-auto">
-                              <InlineMath math={step.formula} />
-                            </div>
-                          )}
-                        </div>
-                        
-                        <div className="p-3 space-y-2">
-                          {/* Inputs */}
-                          {step.inputs.length > 0 && (
-                            <div className="space-y-1">
-                              <div className="text-[10px] uppercase text-muted-foreground font-medium flex items-center gap-1">
-                                Inputs
-                                <HelpTooltip className="h-3 w-3" content="The raw sensor values from neighboring pixels used to calculate this color." />
-                              </div>
-                              <div className="grid grid-cols-2 gap-2">
-                                {step.inputs.map((input, j) => (
-                                  <div key={j} className="flex justify-between items-center bg-muted/20 px-2 py-1 rounded text-xs">
-                                    <span className="text-muted-foreground truncate max-w-[80px]" title={input.label}>{input.label}</span>
-                                    <span className="font-mono font-medium">
-                                       {typeof input.value === 'number' ? input.value.toFixed(3) : 'RGB'}
-                                    </span>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-                          
-                          {/* Output */}
-                          <div className="mt-2 pt-2 border-t border-border/50 flex justify-between items-center">
-                            <span className="text-[10px] uppercase text-muted-foreground font-medium flex items-center gap-1">
-                              Output
-                              <HelpTooltip className="h-3 w-3" content="The final interpolated color value for this channel at this pixel location." />
-                            </span>
-                            <div className="font-mono text-sm font-bold text-foreground bg-primary/10 px-2 py-0.5 rounded text-primary">
-                               {typeof step.output === 'number' ? step.output.toFixed(3) : 'RGB'}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <div className="flex flex-col items-center justify-center h-[300px] text-center p-6 border-2 border-dashed border-muted rounded-lg bg-muted/10">
-                <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center mb-4">
-                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-6 h-6 text-muted-foreground"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-                </div>
-                <h4 className="font-semibold text-foreground">Inspect a Pixel</h4>
-                <p className="text-sm text-muted-foreground mt-1">
-                  Click a pixel on the image canvas to see step-by-step demosaicing details and error metrics.
-                </p>
-              </div>
-            )}
           </TabsContent>
 
           <TabsContent value="error" className="space-y-4 animate-in fade-in-50 overflow-y-auto pr-1 flex-1">
@@ -605,28 +496,28 @@ export function DemosaicMathExplanation({
                         } />
                       </div>
                       <div className="font-mono text-xs">
-                        <div>Total: {errorStats.psnr.total.toFixed(2)}</div>
+                        <div>Total: {errorStats.psnr?.total?.toFixed(2) ?? 'N/A'}</div>
                         <div className="text-muted-foreground">
-                          R: {errorStats.psnr.r.toFixed(2)}, G: {errorStats.psnr.g.toFixed(2)}, B: {errorStats.psnr.b.toFixed(2)}
+                          R: {errorStats.psnr?.r?.toFixed(2) ?? 'N/A'}, G: {errorStats.psnr?.g?.toFixed(2) ?? 'N/A'}, B: {errorStats.psnr?.b?.toFixed(2) ?? 'N/A'}
                         </div>
                       </div>
                     </div>
                     <div className="space-y-1">
                       <div className="text-[10px] uppercase tracking-wide text-muted-foreground">MSE / MAE</div>
                       <div className="font-mono text-xs">
-                        <div>MSE: {errorStats.mse.total.toFixed(2)}</div>
-                        <div>MAE: {errorStats.mae.total.toFixed(2)}</div>
+                        <div>MSE: {errorStats.mse?.total?.toFixed(2) ?? 'N/A'}</div>
+                        <div>MAE: {errorStats.mae?.total?.toFixed(2) ?? 'N/A'}</div>
                       </div>
                     </div>
                     <div className="space-y-1">
                       <div className="text-[10px] uppercase tracking-wide text-muted-foreground">SSIM</div>
-                      <div className="font-mono text-xs">{errorStats.ssim.toFixed(4)}</div>
+                      <div className="font-mono text-xs">{errorStats.ssim?.toFixed(4) ?? 'N/A'}</div>
                     </div>
                     <div className="space-y-1">
                       <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
                         Pixel ({x ?? '-'}, {y ?? '-'})
                       </div>
-                      {error ? (
+                      {error && error.l2 !== undefined ? (
                         <div className="font-mono text-xs">
                           L2:{' '}
                           <span className={error.l2 > 0.1 ? 'text-red-500' : 'text-green-600'}>
@@ -680,49 +571,140 @@ export function DemosaicMathExplanation({
                   </div>
                 </div>
 
-                <div className="bg-muted/30 p-3 rounded-md space-y-2">
-                  <h3 className="font-semibold text-primary text-sm">Theoretical Error View</h3>
-                  {algorithm === 'nearest' ? (
-                    <>
-                      <p className="text-[11px] text-muted-foreground leading-relaxed">
-                        Nearest neighbour is a zero‑order hold: each reconstructed value is a copy of the closest sample. 
-                        In 1D, sampling at spacing Δx and holding the left (or right) sample gives an error controlled by 
-                        the first derivative. Using the mean value theorem between a sample at x₀ and a point x in the next
-                        interval, we write:
+                <div className="bg-muted/30 p-3 rounded-md space-y-3">
+                  <h3 className="font-semibold text-primary text-sm">Theoretical Error Analysis</h3>
+                  
+                  <div className="space-y-3">
+                    <div>
+                      <p className="text-[11px] text-muted-foreground leading-relaxed mb-2">
+                        We analyze reconstruction error <InlineMath math="e_c(x,y) := I_c^\text{CFA}(x,y) - \hat{I}_c(x,y)" />, 
+                        where <InlineMath math="I_c^\text{CFA}" /> is the CFA-sampled value and <InlineMath math="\hat{I}_c" /> 
+                        is the algorithm's reconstruction. We assume smoothness:
                       </p>
-                      <BlockMath math="f(x) = f(x_0) + (x - x_0) f'(\xi), \quad \xi \in [x_0, x]" />
-                      <p className="text-[11px] text-muted-foreground leading-relaxed">
-                        Taking absolute values and using that |x - x₀| ≤ Δx on that interval gives the bound:
+                      <BlockMath math="|\nabla I_c|_\infty \le L, \qquad |H I_c|_\infty \le M" />
+                      <p className="text-[11px] text-muted-foreground leading-relaxed mt-2">
+                        where <InlineMath math="L" /> bounds gradients and <InlineMath math="M" /> bounds curvature (Hessian).
                       </p>
-                      <BlockMath math="|f(x) - f(x_0)| \le \Delta x \, \max_{x_0 \le t \le x_0 + \Delta x} |f'(t)|" />
-                      <p className="text-[11px] text-muted-foreground leading-relaxed">
-                        Large |f'| (strong edges, steep ramps) makes this bound large, so zero‑order hold produces visible 
-                        stair‑steps. In 2D images, this shows up as jagged edges and blocky colour regions wherever spatial 
-                        derivatives are high, and as classic aliasing when the scene contains frequencies above the Nyquist 
-                        limit of the sampling grid.
+                    </div>
+
+                    {algorithm === 'nearest' && (
+                      <div>
+                        <h4 className="text-xs font-semibold text-primary mb-1">Nearest Neighbor</h4>
+                        <p className="text-[11px] text-muted-foreground leading-relaxed">
+                          Zero-order hold: error bounded by first derivative. For spacing <InlineMath math="\Delta x" />:
+                        </p>
+                        <BlockMath math="|f(x) - f(x_0)| \le \Delta x \, \max_{x_0 \le t \le x_0 + \Delta x} |f'(t)|" />
+                      </div>
+                    )}
+
+                    {algorithm === 'bilinear' && (
+                      <div>
+                        <h4 className="text-xs font-semibold text-primary mb-1">Bilinear Interpolation</h4>
+                        <p className="text-[11px] text-muted-foreground leading-relaxed mb-2">
+                          <strong>Worst-case:</strong> For 8-bit images, <InlineMath math="|I_c - \hat{I}_c| \le 255" /> per channel (trivial bound).
+                        </p>
+                        <p className="text-[11px] text-muted-foreground leading-relaxed mb-2">
+                          <strong>Smooth images:</strong> For Bayer CFA with neighbor distance <InlineMath math="d = \sqrt{2}" />:
+                        </p>
+                        <BlockMath math="|I_c(x,y) - \hat{I}_c(x,y)| \le \frac{M d^2}{2} = M" />
+                        <BlockMath math="PSNR_c \ge 20\log_{10}\left(\frac{255}{M}\right)" />
+                        <p className="text-[11px] text-muted-foreground leading-relaxed mt-2">
+                          Examples: <InlineMath math="M \approx 1" /> (smooth sky) → PSNR ≥ 48 dB; 
+                          <InlineMath math="M \approx 10" /> (gentle texture) → PSNR ≥ 28 dB; 
+                          <InlineMath math="M \approx 50" /> (moderate edges) → PSNR ≥ 14 dB.
+                        </p>
+                      </div>
+                    )}
+
+                    {algorithm === 'niu_edge_sensing' && (
+                      <div>
+                        <h4 className="text-xs font-semibold text-primary mb-1">Niu Edge-Sensing</h4>
+                        <p className="text-[11px] text-muted-foreground leading-relaxed mb-2">
+                          Uses asymmetric directional weights. When edge detection works well (normalized max weight ≈ 0.5):
+                        </p>
+                        <BlockMath math="|e_c| \lesssim M + 0.5L\sqrt{2}" />
+                        <BlockMath math="PSNR_c \ge 20\log_{10}\frac{255}{M + 0.5L\sqrt{2}}" />
+                        <p className="text-[11px] text-muted-foreground leading-relaxed mt-2">
+                          For smooth sky (<InlineMath math="M \approx 1, L \approx 5" />): error ≤ 4.5, PSNR ≳ 35 dB. 
+                          When edge detection fails, performance degrades toward bilinear.
+                        </p>
+                      </div>
+                    )}
+
+                    {algorithm === 'lien_edge_based' && (
+                      <div>
+                        <h4 className="text-xs font-semibold text-primary mb-1">Lien Edge-Based</h4>
+                        <p className="text-[11px] text-muted-foreground leading-relaxed mb-2">
+                          Interpolates perpendicular to detected edges. When correct (distance <InlineMath math="d = 1" />):
+                        </p>
+                        <BlockMath math="|C(x,y) - \hat{C}(x,y)| \lesssim \frac{M}{2}" />
+                        <BlockMath math="PSNR_c \ge 20\log_{10}\frac{510}{M}" />
+                        <p className="text-[11px] text-muted-foreground leading-relaxed mt-2">
+                          Examples: <InlineMath math="M \approx 1" /> → PSNR ≳ 54 dB; 
+                          <InlineMath math="M \approx 10" /> → PSNR ≳ 34 dB. 
+                          Misclassification degrades to bilinear-like error (<InlineMath math="\sim M" />).
+                        </p>
+                      </div>
+                    )}
+
+                    {algorithm === 'wu_polynomial' && (
+                      <div>
+                        <h4 className="text-xs font-semibold text-primary mb-1">Wu Polynomial Interpolation</h4>
+                        <p className="text-[11px] text-muted-foreground leading-relaxed mb-2">
+                          Uses distance-weighted averaging. For symmetric neighbors at <InlineMath math="d = \sqrt{2}" />:
+                        </p>
+                        <BlockMath math="|C(x,y) - \hat{C}(x,y)| \lesssim M" />
+                        <BlockMath math="PSNR_c \ge 20\log_{10}\frac{255}{M}" />
+                        <p className="text-[11px] text-muted-foreground leading-relaxed mt-2">
+                          Shares the same worst-case bound as bilinear. Distance weighting improves empirical performance by 
+                          downweighting farther neighbors but doesn't tighten the uniform curvature bound.
+                        </p>
+                      </div>
+                    )}
+
+                    {algorithm === 'kiku_residual' && (
+                      <div>
+                        <h4 className="text-xs font-semibold text-primary mb-1">Kiku Residual Interpolation</h4>
+                        <p className="text-[11px] text-muted-foreground leading-relaxed mb-2">
+                          Iteratively refines by interpolating residuals. With geometric decay <InlineMath math="\alpha \approx 0.6" /> 
+                          and <InlineMath math="K = 3" /> iterations:
+                        </p>
+                        <BlockMath math="|e_c| \lesssim 0.22M, \qquad PSNR_c \gtrsim 20\log_{10}\frac{1159}{M}" />
+                        <p className="text-[11px] text-muted-foreground leading-relaxed mt-2">
+                          For <InlineMath math="M \approx 10" />: error ≤ 2.2, PSNR ≳ 41 dB. This is empirical and assumes 
+                          residual smoothness, not a strict worst-case guarantee.
+                        </p>
+                      </div>
+                    )}
+
+                    {(algorithm === 'malvar' || (algorithm !== 'nearest' && algorithm !== 'bilinear' && algorithm !== 'niu_edge_sensing' && algorithm !== 'lien_edge_based' && algorithm !== 'wu_polynomial' && algorithm !== 'kiku_residual')) && (
+                      <div>
+                        <h4 className="text-xs font-semibold text-primary mb-1">General Linear Methods</h4>
+                        <p className="text-[11px] text-muted-foreground leading-relaxed mb-2">
+                          For linear interpolation methods, Taylor expansion shows the linear term cancels, leaving curvature error:
+                        </p>
+                        <BlockMath math="|I_c(x,y) - \hat{I}_c(x,y)| \le \frac{M d^2}{2}" />
+                        <p className="text-[11px] text-muted-foreground leading-relaxed mt-2">
+                          where <InlineMath math="d" /> is the maximum distance to neighbors used. This explains why high-frequency 
+                          textures produce larger artifacts than smooth regions.
+                        </p>
+                      </div>
+                    )}
+
+                    <div className="pt-2 border-t border-border/50">
+                      <h4 className="text-xs font-semibold text-primary mb-2">Comparison (M=10, L=50)</h4>
+                      <div className="text-[10px] space-y-1 font-mono">
+                        <div className="flex justify-between"><span>Bilinear:</span><span>|e| ≲ 10, PSNR ≥ 28 dB</span></div>
+                        <div className="flex justify-between"><span>Niu:</span><span>|e| ≲ 45, PSNR ≥ 15 dB*</span></div>
+                        <div className="flex justify-between"><span>Lien:</span><span>|e| ≲ 5–10, PSNR ≈ 34–28 dB</span></div>
+                        <div className="flex justify-between"><span>Wu:</span><span>|e| ≲ 10, PSNR ≥ 28 dB</span></div>
+                        <div className="flex justify-between"><span>Kiku:</span><span>|e| ≲ 2.2, PSNR ≳ 41 dB**</span></div>
+                      </div>
+                      <p className="text-[10px] text-muted-foreground leading-relaxed mt-2">
+                        *Assumes good edge detection. **Empirical bound.
                       </p>
-                    </>
-                  ) : (
-                    <>
-                      <p className="text-[11px] text-muted-foreground leading-relaxed">
-                        For a 1D signal f(x), linear interpolation between samples at x₀ and x₁ can be analysed with a Taylor
-                        expansion around the midpoint m = (x₀ + x₁)/2. Writing
-                      </p>
-                      <BlockMath math="f(x) = f(m) + f'(m)(x-m) + \tfrac{1}{2} f''(\xi)(x-m)^2,\quad \xi \in [x_0, x_1]" />
-                      <p className="text-[11px] text-muted-foreground leading-relaxed">
-                        and using that the linear interpolant matches f at x₀ and x₁ and is itself a straight line through those
-                        endpoints, one can show that the linear term cancels in the difference f(x) - \hat f(x), leaving only the 
-                        second‑order remainder. This yields a bound of the form:
-                      </p>
-                      <BlockMath math="|f(x) - \hat{f}(x)| \le \frac{(x_1 - x_0)^2}{8} \, \max_{x_0 \le t \le x_1} |f''(t)|" />
-                      <p className="text-[11px] text-muted-foreground leading-relaxed">
-                        In 2D images, demosaicing with bilinear or Malvar‑type linear filters behaves similarly: the reconstruction 
-                        error at a pixel is bounded by a constant times the local second derivatives (the Laplacian) of the underlying 
-                        colour channels. This explains why high‑frequency textures (zone plates, checkerboards, starburst rays) 
-                        produce much larger artifacts than flat regions or gentle gradients.
-                      </p>
-                    </>
-                  )}
+                    </div>
+                  </div>
                 </div>
               </div>
             ) : (

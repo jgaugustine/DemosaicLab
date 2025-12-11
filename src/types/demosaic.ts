@@ -26,6 +26,7 @@ export interface DemosaicParams {
   
   // Algorithm-specific params
   niuLogisticThreshold?: number; // threshold for edge detection (default: 0.1)
+  niuLogisticSteepness?: number; // steepness parameter k for logistic function (default: 20.0)
   wuPolynomialDegree?: number; // polynomial degree (typically 2-3, default: 2)
   kikuResidualIterations?: number; // number of residual refinement iterations (default: 1)
 }
@@ -40,14 +41,6 @@ export interface CFAPatternSample {
   x: number;
   y: number;
   channel: 'r' | 'g' | 'b' | 'e1' | 'e2'; // e1/e2 for emerald/other if needed, or just rgb
-}
-
-export interface PixelTraceStep {
-  description: string;
-  formula?: string;
-  inputs: { label: string; value: number | PixelRGB }[];
-  output: number | PixelRGB;
-  weight?: number;
 }
 
 export interface ErrorStats {

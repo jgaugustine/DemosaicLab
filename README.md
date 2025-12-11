@@ -16,7 +16,6 @@ All demosaicing logic is implemented in pure TypeScript with no external image p
 
 ### 3. Pixel-Level Inspection
 *   **Zoom In**: See the individual pixels of the reconstructed image or the raw CFA mosaic.
-*   **Pixel Trace**: Hover over any pixel to see a step-by-step breakdown of the math used to calculate its color (e.g., "Average of 4 neighbors: 0.2 + 0.3...").
 
 ### 4. Side-by-Side Comparison
 *   Compare two different algorithms (e.g., Nearest vs. Bilinear) side-by-side on the same image to easily spot differences in edge handling and artifacts.
