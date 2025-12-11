@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, useMemo } from "react";
 import { Card } from "@/components/ui/card";
 import { DemosaicInput, DemosaicAlgorithm, DemosaicParams } from "@/types/demosaic";
 import { getBayerKernel, getXTransKernel } from "@/lib/cfa";
+import { InlineMath } from "react-katex";
+import "katex/dist/katex.min.css";
 
 interface InteractiveDemosaicVisualizerProps {
   input: DemosaicInput;
@@ -132,7 +134,7 @@ export function InteractiveDemosaicVisualizer({
       ? getBayerKernel(cfaPatternMeta.layout) 
       : cfaPattern === 'xtrans'
       ? getXTransKernel()
-      : () => 'g'; // Fallback only for unknown patterns
+      : (x: number, y: number) => 'g' as const; // Fallback only for unknown patterns
     const getVal = (x: number, y: number) => {
         // Mirror padding
         let sx = x; 
@@ -613,7 +615,7 @@ export function InteractiveDemosaicVisualizer({
       ? getBayerKernel(cfaPatternMeta.layout) 
       : cfaPattern === 'xtrans'
       ? getXTransKernel()
-      : () => 'g';
+      : (x: number, y: number) => 'g' as const;
     const centerCh = getChannel(gx, gy);
     
     // Define a small window around cursor to show weights, e.g., 3x3
@@ -1028,7 +1030,7 @@ export function InteractiveDemosaicVisualizer({
       ? getBayerKernel(input.cfaPatternMeta.layout) 
       : input.cfaPattern === 'xtrans'
       ? getXTransKernel()
-      : () => 'g';
+      : (x: number, y: number) => 'g' as const;
     
     const makeVis = (weights: number[][], title: string, targetChannel: 'r' | 'g' | 'b') => {
         const cells = [];
@@ -1137,7 +1139,7 @@ export function InteractiveDemosaicVisualizer({
       ? getBayerKernel(cfaPatternMeta.layout) 
       : cfaPattern === 'xtrans'
       ? getXTransKernel()
-      : () => 'g';
+      : (x: number, y: number) => 'g' as const;
     
     const centerCh = getChannel(gx, gy);
     const getVal = (x: number, y: number) => {
@@ -1826,6 +1828,17 @@ export function InteractiveDemosaicVisualizer({
         gNeighbors?: Array<{x: number, y: number, val: number}>;
         bNeighbors?: Array<{x: number, y: number, val: number}>;
     } = {};
+    // Extra detail for the residual-based method so the breakdown can show both the baseline and residual corrections
+    let kikuResidualDetail: {
+      initialR: number;
+      initialG: number;
+      initialB: number;
+      residualSamplesR: Array<{x: number, y: number, val: number, residual: number}>;
+      residualSamplesG: Array<{x: number, y: number, val: number, residual: number}>;
+      residualSamplesB: Array<{x: number, y: number, val: number, residual: number}>;
+      residualApplied: { r: number; g: number; b: number };
+      iterations: number;
+    } | null = null;
     
     if (algorithm === 'nearest') {
         // Find nearest neighbors using expanding search
@@ -2240,49 +2253,114 @@ export function InteractiveDemosaicVisualizer({
             }
         }
     } else if (algorithm === 'kiku_residual') {
-        // Use bilinear collectNeighbors for initial estimate (radius 1)
+        const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
+
+        // Bilinear estimate helper (mirrors the region visualizer logic above)
+        const getInitialEstimate = (px: number, py: number, targetCh: 'r' | 'g' | 'b'): number => {
+            // Always compute a bilinear-style estimate, even if the pixel already has that channel.
+            // This avoids zero residuals caused by short-circuiting to the observed value.
+            if (targetCh === 'g') {
+                // Cross average of green neighbors
+                const gVals = [
+                    getVal(px - 1, py), getVal(px + 1, py),
+                    getVal(px, py - 1), getVal(px, py + 1)
+                ].filter((v) => v !== undefined);
+                return gVals.length > 0 ? gVals.reduce((a, b) => a + b, 0) / gVals.length : getVal(px, py);
+            }
+            if (targetCh === 'r') {
+                // Average red corners
+                const rVals = [
+                    getVal(px - 1, py - 1), getVal(px + 1, py - 1),
+                    getVal(px - 1, py + 1), getVal(px + 1, py + 1)
+                ].filter((v) => v !== undefined);
+                return rVals.length > 0 ? rVals.reduce((a, b) => a + b, 0) / rVals.length : getVal(px, py);
+            }
+            // targetCh === 'b'
+            const bVals = [
+                getVal(px - 1, py - 1), getVal(px + 1, py - 1),
+                getVal(px - 1, py + 1), getVal(px + 1, py + 1)
+            ].filter((v) => v !== undefined);
+            return bVals.length > 0 ? bVals.reduce((a, b) => a + b, 0) / bVals.length : getVal(px, py);
+        };
+
+        // Baseline (bilinear) estimate at the center pixel
+        let initialR = 0, initialG = 0, initialB = 0;
         if (centerCh === 'g') {
-            g = centerVal;
-            const rNeighbors = collectNeighbors('r', 1);
-            const bNeighbors = collectNeighbors('b', 1);
+            initialG = centerVal;
             const leftCh = getChannel(gx - 1, gy);
             const isRedRow = (leftCh === 'r' || getChannel(gx + 1, gy) === 'r');
             if (isRedRow) {
-                neighborData.rNeighbors = rNeighbors.positions.filter(p => p.y === gy);
-                neighborData.bNeighbors = bNeighbors.positions.filter(p => p.x === gx);
+                initialR = (getVal(gx-1, gy) + getVal(gx+1, gy)) / 2;
+                initialB = (getVal(gx, gy-1) + getVal(gx, gy+1)) / 2;
             } else {
-                neighborData.rNeighbors = rNeighbors.positions.filter(p => p.x === gx);
-                neighborData.bNeighbors = bNeighbors.positions.filter(p => p.y === gy);
+                initialR = (getVal(gx, gy-1) + getVal(gx, gy+1)) / 2;
+                initialB = (getVal(gx-1, gy) + getVal(gx+1, gy)) / 2;
             }
-            const rVals = neighborData.rNeighbors.map(p => p.val);
-            const bVals = neighborData.bNeighbors.map(p => p.val);
-            r = rVals.length > 0 ? rVals.reduce((a, b) => a + b, 0) / rVals.length : 0;
-            b = bVals.length > 0 ? bVals.reduce((a, b) => a + b, 0) / bVals.length : 0;
         } else if (centerCh === 'r') {
-            r = centerVal;
-            const gNeighbors = collectNeighbors('g', 1);
-            const bNeighbors = collectNeighbors('b', 1);
-            neighborData.gNeighbors = gNeighbors.positions;
-            neighborData.bNeighbors = bNeighbors.positions.filter(p => 
-                (p.x === gx - 1 || p.x === gx + 1) && (p.y === gy - 1 || p.y === gy + 1)
-            );
-            const gVals = neighborData.gNeighbors.map(p => p.val);
-            const bVals = neighborData.bNeighbors.map(p => p.val);
-            g = gVals.length > 0 ? gVals.reduce((a, b) => a + b, 0) / gVals.length : 0;
-            b = bVals.length > 0 ? bVals.reduce((a, b) => a + b, 0) / bVals.length : 0;
+            initialR = centerVal;
+            initialG = (getVal(gx-1, gy) + getVal(gx+1, gy) + getVal(gx, gy-1) + getVal(gx, gy+1)) / 4;
+            initialB = (getVal(gx-1, gy-1) + getVal(gx+1, gy-1) + getVal(gx-1, gy+1) + getVal(gx+1, gy+1)) / 4;
         } else {
-            b = centerVal;
-            const gNeighbors = collectNeighbors('g', 1);
-            const rNeighbors = collectNeighbors('r', 1);
-            neighborData.gNeighbors = gNeighbors.positions;
-            neighborData.rNeighbors = rNeighbors.positions.filter(p => 
-                (p.x === gx - 1 || p.x === gx + 1) && (p.y === gy - 1 || p.y === gy + 1)
-            );
-            const gVals = neighborData.gNeighbors.map(p => p.val);
-            const rVals = neighborData.rNeighbors.map(p => p.val);
-            g = gVals.length > 0 ? gVals.reduce((a, b) => a + b, 0) / gVals.length : 0;
-            r = rVals.length > 0 ? rVals.reduce((a, b) => a + b, 0) / rVals.length : 0;
+            initialB = centerVal;
+            initialG = (getVal(gx-1, gy) + getVal(gx+1, gy) + getVal(gx, gy-1) + getVal(gx, gy+1)) / 4;
+            initialR = (getVal(gx-1, gy-1) + getVal(gx+1, gy-1) + getVal(gx-1, gy+1) + getVal(gx+1, gy+1)) / 4;
         }
+
+        // Collect residuals from surrounding measured pixels of each channel
+        const collectResidualNeighborsWithPos = (
+          targetColor: 'r' | 'g' | 'b',
+          maxRadius: number = 5
+        ): Array<{x: number, y: number, val: number, residual: number}> => {
+          const results: Array<{x: number, y: number, val: number, residual: number}> = [];
+          for (let dy = -maxRadius; dy <= maxRadius; dy++) {
+            for (let dx = -maxRadius; dx <= maxRadius; dx++) {
+              if (dx === 0 && dy === 0) continue;
+              const nx = gx + dx;
+              const ny = gy + dy;
+              if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+              const nch = getChannel(nx, ny);
+              if (nch === targetColor) {
+                const observed = getVal(nx, ny);
+                const estimate = getInitialEstimate(nx, ny, targetColor);
+                results.push({ x: nx, y: ny, val: observed, residual: observed - estimate });
+              }
+            }
+          }
+          return results;
+        };
+
+        const residualSamplesR = collectResidualNeighborsWithPos('r', 5);
+        const residualSamplesG = collectResidualNeighborsWithPos('g', 5);
+        const residualSamplesB = collectResidualNeighborsWithPos('b', 5);
+
+        const meanResidual = (samples: Array<{ residual: number }>) =>
+          samples.length > 0 ? samples.reduce((sum, s) => sum + s.residual, 0) / samples.length : 0;
+
+        const residualR = centerCh === 'r' ? (centerVal - initialR) : meanResidual(residualSamplesR);
+        const residualG = centerCh === 'g' ? (centerVal - initialG) : meanResidual(residualSamplesG);
+        const residualB = centerCh === 'b' ? (centerVal - initialB) : meanResidual(residualSamplesB);
+
+        r = clamp01(initialR + residualR);
+        g = clamp01(initialG + residualG);
+        b = clamp01(initialB + residualB);
+
+        // Track neighbors for overlays and breakdown
+        neighborData = {
+          rNeighbors: residualSamplesR.map(({ x, y, val }) => ({ x, y, val })),
+          gNeighbors: residualSamplesG.map(({ x, y, val }) => ({ x, y, val })),
+          bNeighbors: residualSamplesB.map(({ x, y, val }) => ({ x, y, val })),
+        };
+
+        kikuResidualDetail = {
+          initialR,
+          initialG,
+          initialB,
+          residualSamplesR,
+          residualSamplesG,
+          residualSamplesB,
+          residualApplied: { r: residualR, g: residualG, b: residualB },
+          iterations: params?.kikuResidualIterations ?? 1,
+        };
     }
     
     if (algorithm === 'nearest') {
@@ -2681,62 +2759,66 @@ export function InteractiveDemosaicVisualizer({
           });
         }
       }
-    } else if (algorithm === 'kiku_residual') {
-      const iterations = params?.kikuResidualIterations ?? 1;
-      if (neighborData.gNeighbors && neighborData.gNeighbors.length > 0 && centerCh !== 'g') {
-        const gVals = neighborData.gNeighbors.map(n => to255(n.val));
+    } else if (algorithm === 'kiku_residual' && kikuResidualDetail) {
+      const {
+        initialR,
+        initialG,
+        initialB,
+        residualSamplesR,
+        residualSamplesG,
+        residualSamplesB,
+        residualApplied,
+        iterations,
+      } = kikuResidualDetail;
+
+      let stepIndex = 2;
+      const formatResidual = (val: number) => {
+        const scaled = val * 255;
+        const sign = scaled >= 0 ? "+" : "−";
+        const mag = Math.abs(scaled).toFixed(2);
+        return `${sign}${mag}`;
+      };
+
       breakdown.push({
-          step: '2. Initial Bilinear Green Estimate',
-          description: `Bilinear interpolation using ${neighborData.gNeighbors.length} green neighbor${neighborData.gNeighbors.length > 1 ? 's' : ''}`,
-          formula: 'Ĝ₀ = Bilinear(G_neighbors)',
-          result: `${gVals.map(v => `(0, ${v}, 0)`).join(', ')} → ${to255(g)}`
-        });
-      }
-      if (neighborData.bNeighbors && neighborData.bNeighbors.length > 0 && centerCh === 'r') {
-        const bVals = neighborData.bNeighbors.map(n => to255(n.val));
-      breakdown.push({
-          step: '3. Initial Bilinear Blue Estimate',
-          description: `Bilinear interpolation using ${neighborData.bNeighbors.length} blue neighbor${neighborData.bNeighbors.length > 1 ? 's' : ''}`,
-          formula: 'B̂₀ = Bilinear(B_neighbors)',
-          result: `${bVals.map(v => `(0, 0, ${v})`).join(', ')} → ${to255(b)}`
-        });
-      }
-      if (neighborData.rNeighbors && neighborData.rNeighbors.length > 0 && centerCh === 'b') {
-        const rVals = neighborData.rNeighbors.map(n => to255(n.val));
+        step: `${stepIndex++}. Bilinear Baseline`,
+        description: 'Initial estimate using simple bilinear interpolation for all channels.',
+        formula: '\\hat{I}_0 = \\text{Bilinear}(\\text{CFA})',
+        result: `R₀=${to255(initialR)}, G₀=${to255(initialG)}, B₀=${to255(initialB)}`
+      });
+
+      const describeResiduals = (
+        label: 'R' | 'G' | 'B',
+        samples: Array<{ residual: number, val: number }>,
+        applied: number,
+        initialVal: number
+      ) => {
+        const sampleText = samples.length > 0
+          ? `${samples.length} residual sample${samples.length > 1 ? 's' : ''}`
+          : 'no nearby residual samples (residual = 0)';
+        const meanFromSamples = samples.length > 0
+          ? samples.reduce((sum, s) => sum + s.residual, 0) / samples.length
+          : 0;
+        const applied255 = applied * 255;
+        const meanSamples255 = meanFromSamples * 255;
         breakdown.push({
-          step: '3. Initial Bilinear Red Estimate',
-          description: `Bilinear interpolation using ${neighborData.rNeighbors.length} red neighbor${neighborData.rNeighbors.length > 1 ? 's' : ''}`,
-          formula: 'R̂₀ = Bilinear(R_neighbors)',
-          result: `${rVals.map(v => `(${v}, 0, 0)`).join(', ')} → ${to255(r)}`
+          step: `${stepIndex++}. ${label} Residual Field`,
+          description: `${sampleText}; applied residual ${formatResidual(applied)} (mean from samples: ${meanSamples255 >= 0 ? '+' : '−'}${Math.abs(meanSamples255).toFixed(2)}) in 0–255 units`,
+          formula: `\\hat{${label}} = ${label}_0 + \\operatorname{mean}\\left(R_{${label}}\\right)`,
+          result: `${label}̂ = ${to255(initialVal)} ${formatResidual(applied)} → ${to255(initialVal + applied)}`
         });
-      }
-      if ((neighborData.rNeighbors || neighborData.bNeighbors) && centerCh === 'g') {
-        if (neighborData.rNeighbors && neighborData.rNeighbors.length > 0) {
-          const rVals = neighborData.rNeighbors.map(n => to255(n.val));
-          breakdown.push({
-            step: '2. Initial Bilinear Red Estimate',
-            description: `Bilinear interpolation using ${neighborData.rNeighbors.length} red neighbor${neighborData.rNeighbors.length > 1 ? 's' : ''}`,
-            formula: 'R̂₀ = Bilinear(R_neighbors)',
-            result: `${rVals.map(v => `(${v}, 0, 0)`).join(', ')} → ${to255(r)}`
-          });
-        }
-        if (neighborData.bNeighbors && neighborData.bNeighbors.length > 0) {
-          const bVals = neighborData.bNeighbors.map(n => to255(n.val));
-          breakdown.push({
-            step: '3. Initial Bilinear Blue Estimate',
-            description: `Bilinear interpolation using ${neighborData.bNeighbors.length} blue neighbor${neighborData.bNeighbors.length > 1 ? 's' : ''}`,
-            formula: 'B̂₀ = Bilinear(B_neighbors)',
-            result: `${bVals.map(v => `(0, 0, ${v})`).join(', ')} → ${to255(b)}`
-          });
-        }
-      }
+      };
+
+      describeResiduals('R', residualSamplesR, residualApplied.r, initialR);
+      describeResiduals('G', residualSamplesG, residualApplied.g, initialG);
+      describeResiduals('B', residualSamplesB, residualApplied.b, initialB);
+
       if (iterations > 1) {
         breakdown.push({
-          step: '4. Residual Interpolation',
-          description: `Interpolate residuals for ${iterations - 1} additional iteration(s)`,
-        formula: 'R = I_observed - Î₀, then Î = Î₀ + Interp(R)',
-          result: `Refined estimate after ${iterations} total iteration(s)`
-      });
+          step: `${stepIndex++}. Extra Iterations`,
+          description: `Residuals can be re-interpolated ${iterations - 1} more time(s) for refinement.`,
+          formula: 'Repeat: R = I_{\\text{obs}} - \\hat{I},\\; \\hat{I} \\leftarrow \\hat{I} + \\text{Interp}(R)',
+          result: `Î after ${iterations} iteration(s)`
+        });
       }
     }
     
@@ -2809,7 +2891,7 @@ export function InteractiveDemosaicVisualizer({
               </div>
               {step.formula && (
                 <div className="text-[10px] font-mono bg-background/50 px-2 py-1 rounded border border-border/30">
-                  {step.formula}
+                  <InlineMath math={step.formula} />
                 </div>
               )}
               <div className="text-[11px] font-mono text-primary font-medium">

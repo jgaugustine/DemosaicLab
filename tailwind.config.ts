@@ -64,6 +64,11 @@ export default {
         sm: "calc(var(--radius) - 4px)",
       },
       keyframes: {
+        "progress-indeterminate": {
+          "0%": { transform: "translateX(-100%)" },
+          "50%": { transform: "translateX(-25%)" },
+          "100%": { transform: "translateX(100%)" },
+        },
         "accordion-down": {
           from: {
             height: "0",
@@ -82,6 +87,7 @@ export default {
         },
       },
       animation: {
+        "progress-indeterminate": "progress-indeterminate 1.4s ease-in-out infinite",
         "accordion-down": "accordion-down 0.2s ease-out",
         "accordion-up": "accordion-up 0.2s ease-out",
       },

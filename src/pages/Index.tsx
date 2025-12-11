@@ -91,6 +91,30 @@ export default function Index() {
   const [viewMode, setViewMode] = useState<'original' | 'cfa' | 'reconstruction'>('reconstruction');
   const [zoom, setZoom] = useState(1);
   const [isFit, setIsFit] = useState(true);
+  const isAnyProcessing = isProcessing1 || isProcessing2;
+  const [showProcessingOverlay, setShowProcessingOverlay] = useState(false);
+  const processingLabel = React.useMemo(() => {
+    if (isProcessing1 && isProcessing2) {
+      return `Algorithms A (${getAlgorithmName(algorithm)}) & B (${getAlgorithmName(algorithm2)})`;
+    }
+    if (isProcessing1) {
+      return `Algorithm A (${getAlgorithmName(algorithm)})`;
+    }
+    if (isProcessing2) {
+      return `Algorithm B (${getAlgorithmName(algorithm2)})`;
+    }
+    return '';
+  }, [isProcessing1, isProcessing2, algorithm, algorithm2]);
+
+  // Keep the global loading bar visible for at least a short duration
+  useEffect(() => {
+    if (isAnyProcessing) {
+      setShowProcessingOverlay(true);
+      return;
+    }
+    const timeout = window.setTimeout(() => setShowProcessingOverlay(false), 300);
+    return () => window.clearTimeout(timeout);
+  }, [isAnyProcessing]);
   
   // Cache for reconstruction results
   // Key format: `${inputId}-${algorithm}-${cfaType}-${paramsHash}`
@@ -321,10 +345,7 @@ export default function Index() {
     e.preventDefault();
     setIsFit(false);
     const delta = e.deltaY > 0 ? 0.9 : 1.1;
-    setZoom(z => {
-      const newZoom = Math.max(0.1, Math.min(32, z * delta));
-      return newZoom;
-    });
+    setZoom(z => Math.max(0.1, Math.min(32, z * delta)));
   };
 
   // Check if original view is available
@@ -1070,9 +1091,7 @@ export default function Index() {
   useEffect(() => {
     if (!input || (input.mode !== 'lab' && input.mode !== 'synthetic')) {
       // For raw mode or no input, default to reconstruction or CFA
-      if (viewMode === 'original') {
-        setViewMode('reconstruction');
-      }
+      if (viewMode === 'original') setViewMode('reconstruction');
     }
   }, [input, viewMode]);
 
@@ -1739,6 +1758,21 @@ export default function Index() {
                      </>
                    );
                  })()}
+
+              {showProcessingOverlay && (
+                <div className="pointer-events-none absolute bottom-3 right-3 z-40 w-[360px] max-w-[80vw]">
+                  <div className="pointer-events-auto bg-card/95 border-2 border-primary/50 shadow-2xl rounded-xl px-4 py-3 flex items-start gap-4 backdrop-blur-sm">
+                    <Loader2 className="w-6 h-6 mt-0.5 text-primary animate-spin shrink-0" />
+                    <div className="flex-1 space-y-2">
+                      <div className="text-sm font-semibold text-foreground tracking-tight">Running demosaicing…</div>
+                      <div className="text-[12px] text-muted-foreground leading-snug">{processingLabel}</div>
+                      <div className="relative h-3 w-full overflow-hidden rounded-full bg-muted">
+                        <div className="absolute inset-y-0 left-0 w-1/2 bg-gradient-to-r from-primary/70 via-primary to-primary/70 animate-progress-indeterminate" />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
               </div>
               
               <div className="h-12 border-t bg-card flex items-center justify-between px-4 shrink-0">
@@ -1806,15 +1840,6 @@ export default function Index() {
           </div>
         </div>
       </main>
-      
-      {/* Floating Benchmark Mode Button */}
-      <Button 
-        variant="outline" 
-        className="fixed bottom-6 right-6 shadow-lg"
-        onClick={() => setBenchmarkMode(true)}
-      >
-        Enter Benchmark Mode
-      </Button>
     </div>
   );
 }

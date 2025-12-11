@@ -450,15 +450,25 @@ export function DemosaicMathExplanation({
                     )}
                     {algorithm === 'kiku_residual' && (
                       <>
-                        <p><strong>Residual Interpolation</strong> (Kiku et al., 2016). This algorithm moves beyond traditional color difference methods by interpolating residuals—the differences between observed and estimated values—rather than directly interpolating colors.</p>
-                        <p>The process involves three main steps:</p>
+                        <p><strong>Residual Interpolation</strong> (Kiku et al., 2016). Rather than directly interpolating missing colors, the algorithm interpolates <em>residuals</em> (what the initial guess got wrong) and adds those corrections back.</p>
                         <ol className="list-decimal list-inside space-y-1 text-xs">
-                          <li><strong>Initial estimation:</strong> Compute an initial estimate using simple interpolation (e.g., bilinear): <InlineMath math="\hat{I}_0" /></li>
-                          <li><strong>Residual calculation:</strong> Compute residuals at observed pixels: <InlineMath math="R = I_{observed} - \hat{I}_0" /></li>
-                          <li><strong>Residual interpolation:</strong> Interpolate residuals to missing locations and refine: <InlineMath math="\hat{I} = \hat{I}_0 + \text{Interp}(R)" /></li>
+                          <li>
+                            <strong>Baseline:</strong> Build an initial estimate with bilinear interpolation <InlineMath math="\hat{I}_{0,c}(x,y)" /> for each channel <InlineMath math="c \in \{R,G,B\}" />.
+                          </li>
+                          <li>
+                            <strong>Residuals at measured samples:</strong> For pixels that actually observe channel <InlineMath math="c" />, compute the error
+                            <BlockMath math="R_c(x,y) = I^{\text{obs}}_c(x,y) - \hat{I}_{0,c}(x,y)" />
+                            (zero elsewhere).
+                          </li>
+                          <li>
+                            <strong>Interpolate the residual field:</strong> Spread those residuals to missing locations with a neighborhood average over same-color samples
+                            <BlockMath math="\tilde{R}_c(x,y) = \frac{1}{|\mathcal{N}_c|} \sum_{(i,j)\in \mathcal{N}_c} R_c(x+i,y+j)" />
+                          </li>
+                          <li>
+                            <strong>Refine:</strong> Add the interpolated residuals back: <InlineMath math="\hat{I}_c = \hat{I}_{0,c} + \tilde{R}_c" />. Repeat for a small number of iterations if desired.
+                          </li>
                         </ol>
-                        <p>This approach adapts to local image structures and varying spectral correlations, effectively reducing artifacts and improving color accuracy.</p>
-                        <p><strong>Key advantage:</strong> Superior performance in both objective metrics and visual quality compared to color difference methods, with better artifact reduction and detail preservation.</p>
+                        <p><strong>Why it helps:</strong> The baseline handles smooth areas; the residual field re-injects high-frequency structure and cross-channel correlations, reducing zippering and false colors compared with pure color-difference interpolation.</p>
                       </>
                     )}
                  </div>
