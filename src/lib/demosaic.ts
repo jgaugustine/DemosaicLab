@@ -415,99 +415,232 @@ export const demosaicLienEdgeBased = (input: DemosaicInput): ImageData => {
   const getChannel = getChannelFunction(input);
   const val = (cx: number, cy: number) => getCfaVal(cfaData, width, height, cx, cy);
   
+  // Helper to safely get pixel from array
+  const getPixel = (arr: Float32Array | Uint16Array, x: number, y: number): number => {
+    if (x < 0 || x >= width || y < 0 || y >= height) return 0;
+    return arr[y * width + x];
+  };
+  
+  // Allocate planes
+  const G = new Float32Array(width * height);
+  const RG = new Float32Array(width * height); // R - G
+  const BG = new Float32Array(width * height); // B - G
+  const RGComputed = new Uint8Array(width * height); // Flag: 1 if RG is known/computed
+  const BGComputed = new Uint8Array(width * height); // Flag: 1 if BG is known/computed
+  
+  // Step 1: Initialize known samples from CFA
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      const centerCh = getChannel(x, y);
-      const centerVal = cfaData[y * width + x];
-      const idx = (y * width + x) * 4;
-      
-      let r = 0, g = 0, b = 0;
-      
-      if (centerCh === 'g') {
-        g = centerVal;
-        
-        // Detect edge direction using the immediate neighbors
-        // For Bayer at green pixel: horizontal neighbors are R or B (depending on row), vertical are opposite
-        // Use the raw differences to detect edge direction
-        const diffH = Math.abs(val(x - 1, y) - val(x + 1, y));
-        const diffV = Math.abs(val(x, y - 1) - val(x, y + 1));
-        
-        const leftCh = getChannel(Math.max(0, x - 1), y);
-        const isRedRow = (leftCh === 'r' || getChannel(Math.min(width - 1, x + 1), y) === 'r');
-        
-        if (isRedRow) {
-          if (diffH < diffV) {
-            // Edge is horizontal, interpolate R horizontally, B vertically
-            r = (val(x - 1, y) + val(x + 1, y)) / 2;
-            b = (val(x, y - 1) + val(x, y + 1)) / 2;
-          } else {
-            // Edge is vertical, interpolate R vertically, B horizontally
-            r = (val(x, y - 1) + val(x, y + 1)) / 2;
-            b = (val(x - 1, y) + val(x + 1, y)) / 2;
-          }
-        } else {
-          if (diffH < diffV) {
-            // Edge is horizontal, interpolate B horizontally, R vertically
-            r = (val(x, y - 1) + val(x, y + 1)) / 2;
-            b = (val(x - 1, y) + val(x + 1, y)) / 2;
-          } else {
-            // Edge is vertical, interpolate B vertically, R horizontally
-            r = (val(x - 1, y) + val(x + 1, y)) / 2;
-            b = (val(x, y - 1) + val(x, y + 1)) / 2;
-          }
-        }
-      } else if (centerCh === 'r') {
-        r = centerVal;
-        
-        // Edge-aware green interpolation
-        // For Bayer: horizontal neighbors (x-1,y) and (x+1,y) are G, vertical (x,y-1) and (x,y+1) are G
-        const gH1 = val(x - 1, y);
-        const gH2 = val(x + 1, y);
-        const gV1 = val(x, y - 1);
-        const gV2 = val(x, y + 1);
-        
-        const diffH = Math.abs(gH1 - gH2);
-        const diffV = Math.abs(gV1 - gV2);
-        
-        if (diffH < diffV) {
-          // Edge is horizontal, use horizontal green neighbors
-          g = (gH1 + gH2) / 2;
-        } else {
-          // Edge is vertical, use vertical green neighbors
-          g = (gV1 + gV2) / 2;
-        }
-        
-        // Interpolate blue via color difference
-        const avgB = (val(x - 1, y - 1) + val(x + 1, y - 1) + val(x - 1, y + 1) + val(x + 1, y + 1)) / 4;
-        const avgG = (gH1 + gH2 + gV1 + gV2) / 4;
-        b = avgB + (g - avgG);
+      const ch = getChannel(x, y);
+      const v = cfaData[y * width + x];
+      if (ch === 'r') {
+        G[y * width + x] = 0; // Will be interpolated
+      } else if (ch === 'b') {
+        G[y * width + x] = 0; // Will be interpolated
       } else {
-        // Blue pixel
-        b = centerVal;
-        
-        // Edge-aware green interpolation
-        // For Bayer: horizontal neighbors (x-1,y) and (x+1,y) are G, vertical (x,y-1) and (x,y+1) are G
-        const gH1 = val(x - 1, y);
-        const gH2 = val(x + 1, y);
-        const gV1 = val(x, y - 1);
-        const gV2 = val(x, y + 1);
-        
-        const diffH = Math.abs(gH1 - gH2);
-        const diffV = Math.abs(gV1 - gV2);
-        
-        if (diffH < diffV) {
-          // Edge is horizontal, use horizontal green neighbors
-          g = (gH1 + gH2) / 2;
-        } else {
-          // Edge is vertical, use vertical green neighbors
-          g = (gV1 + gV2) / 2;
-        }
-        
-        // Interpolate red via color difference
-        const avgR = (val(x - 1, y - 1) + val(x + 1, y - 1) + val(x - 1, y + 1) + val(x + 1, y + 1)) / 4;
-        const avgG = (gH1 + gH2 + gV1 + gV2) / 4;
-        r = avgR + (g - avgG);
+        G[y * width + x] = v; // Green is known
       }
+    }
+  }
+  
+  // Step 2: Edge-oriented interpolation of G at R/B positions
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const ch = getChannel(x, y);
+      if (ch === 'r' || ch === 'b') {
+        // Horizontal gradient using neighboring green samples
+        // For Bayer: at R/B pixels, horizontal neighbors should be G
+        const ghLeft = getChannel(x - 1, y) === 'g' ? getPixel(G, x - 1, y) : 0;
+        const ghRight = getChannel(x + 1, y) === 'g' ? getPixel(G, x + 1, y) : 0;
+        const gradH = Math.abs(ghLeft - ghRight);
+        
+        // Vertical gradient using neighboring green samples
+        // For Bayer: at R/B pixels, vertical neighbors should be G
+        const gvUp = getChannel(x, y - 1) === 'g' ? getPixel(G, x, y - 1) : 0;
+        const gvDown = getChannel(x, y + 1) === 'g' ? getPixel(G, x, y + 1) : 0;
+        const gradV = Math.abs(gvUp - gvDown);
+        
+        if (gradH < gradV && gvUp > 0 && gvDown > 0) {
+          // Edge is stronger vertically, interpolate horizontally
+          G[y * width + x] = (gvUp + gvDown) / 2;
+        } else if (gradV < gradH && ghLeft > 0 && ghRight > 0) {
+          // Edge stronger horizontally, interpolate vertically
+          G[y * width + x] = (ghLeft + ghRight) / 2;
+        } else {
+          // No clear edge direction, isotropic - use available neighbors
+          let sum = 0, count = 0;
+          if (ghLeft > 0) { sum += ghLeft; count++; }
+          if (ghRight > 0) { sum += ghRight; count++; }
+          if (gvUp > 0) { sum += gvUp; count++; }
+          if (gvDown > 0) { sum += gvDown; count++; }
+          G[y * width + x] = count > 0 ? sum / count : 0;
+        }
+      }
+    }
+  }
+  
+  // Step 3: Build color difference planes R-G and B-G (known where R/B known)
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const ch = getChannel(x, y);
+      const v = cfaData[y * width + x];
+      const g = G[y * width + x];
+      if (ch === 'r') {
+        RG[y * width + x] = v - g;
+        RGComputed[y * width + x] = 1;
+      } else if (ch === 'b') {
+        BG[y * width + x] = v - g;
+        BGComputed[y * width + x] = 1;
+      }
+      // At green positions, RG/BG still 0 and not computed yet
+    }
+  }
+  
+  // Step 4: Edge-directed interpolation of RG (R-G) plane
+  // Use multiple passes to handle cases where immediate neighbors aren't red
+  for (let pass = 0; pass < 3; pass++) {
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const ch = getChannel(x, y);
+        if (ch !== 'r' && RGComputed[y * width + x] === 0) {
+          // Need to interpolate R-G at this pixel (green or blue position)
+          const neighbors: number[] = [];
+          
+          // Check immediate neighbors
+          if (x > 0 && RGComputed[(y) * width + (x - 1)]) {
+            neighbors.push({val: getPixel(RG, x - 1, y), pos: 'h'});
+          }
+          if (x < width - 1 && RGComputed[(y) * width + (x + 1)]) {
+            neighbors.push({val: getPixel(RG, x + 1, y), pos: 'h'});
+          }
+          if (y > 0 && RGComputed[(y - 1) * width + (x)]) {
+            neighbors.push({val: getPixel(RG, x, y - 1), pos: 'v'});
+          }
+          if (y < height - 1 && RGComputed[(y + 1) * width + (x)]) {
+            neighbors.push({val: getPixel(RG, x, y + 1), pos: 'v'});
+          }
+          
+          // In later passes, also try diagonals
+          if (pass > 0) {
+            if (x > 0 && y > 0 && RGComputed[(y - 1) * width + (x - 1)]) {
+              neighbors.push({val: getPixel(RG, x - 1, y - 1), pos: 'd'});
+            }
+            if (x < width - 1 && y > 0 && RGComputed[(y - 1) * width + (x + 1)]) {
+              neighbors.push({val: getPixel(RG, x + 1, y - 1), pos: 'd'});
+            }
+            if (x > 0 && y < height - 1 && RGComputed[(y + 1) * width + (x - 1)]) {
+              neighbors.push({val: getPixel(RG, x - 1, y + 1), pos: 'd'});
+            }
+            if (x < width - 1 && y < height - 1 && RGComputed[(y + 1) * width + (x + 1)]) {
+              neighbors.push({val: getPixel(RG, x + 1, y + 1), pos: 'd'});
+            }
+          }
+          
+          if (neighbors.length >= 2) {
+            const hNeighbors = neighbors.filter(n => n.pos === 'h').map(n => n.val);
+            const vNeighbors = neighbors.filter(n => n.pos === 'v').map(n => n.val);
+            
+            let gradH = 0, gradV = 0;
+            if (hNeighbors.length >= 2) {
+              gradH = Math.abs(hNeighbors[0] - hNeighbors[1]);
+            }
+            if (vNeighbors.length >= 2) {
+              gradV = Math.abs(vNeighbors[0] - vNeighbors[1]);
+            }
+            
+            if (gradH < gradV && vNeighbors.length >= 2) {
+              RG[y * width + x] = vNeighbors.reduce((a, b) => a + b, 0) / vNeighbors.length;
+              RGComputed[y * width + x] = 1;
+            } else if (gradV < gradH && hNeighbors.length >= 2) {
+              RG[y * width + x] = hNeighbors.reduce((a, b) => a + b, 0) / hNeighbors.length;
+              RGComputed[y * width + x] = 1;
+            } else if (neighbors.length > 0) {
+              // Isotropic
+              RG[y * width + x] = neighbors.reduce((a, b) => a + b.val, 0) / neighbors.length;
+              RGComputed[y * width + x] = 1;
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  // Step 5: Edge-directed interpolation of BG (B-G) plane
+  // Use multiple passes to handle cases where immediate neighbors aren't blue
+  for (let pass = 0; pass < 3; pass++) {
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const ch = getChannel(x, y);
+        if (ch !== 'b' && BGComputed[y * width + x] === 0) {
+          // Need to interpolate B-G at this pixel (green or red position)
+          const neighbors: {val: number, pos: string}[] = [];
+          
+          // Check immediate neighbors
+          if (x > 0 && BGComputed[(y) * width + (x - 1)]) {
+            neighbors.push({val: getPixel(BG, x - 1, y), pos: 'h'});
+          }
+          if (x < width - 1 && BGComputed[(y) * width + (x + 1)]) {
+            neighbors.push({val: getPixel(BG, x + 1, y), pos: 'h'});
+          }
+          if (y > 0 && BGComputed[(y - 1) * width + (x)]) {
+            neighbors.push({val: getPixel(BG, x, y - 1), pos: 'v'});
+          }
+          if (y < height - 1 && BGComputed[(y + 1) * width + (x)]) {
+            neighbors.push({val: getPixel(BG, x, y + 1), pos: 'v'});
+          }
+          
+          // In later passes, also try diagonals
+          if (pass > 0) {
+            if (x > 0 && y > 0 && BGComputed[(y - 1) * width + (x - 1)]) {
+              neighbors.push({val: getPixel(BG, x - 1, y - 1), pos: 'd'});
+            }
+            if (x < width - 1 && y > 0 && BGComputed[(y - 1) * width + (x + 1)]) {
+              neighbors.push({val: getPixel(BG, x + 1, y - 1), pos: 'd'});
+            }
+            if (x > 0 && y < height - 1 && BGComputed[(y + 1) * width + (x - 1)]) {
+              neighbors.push({val: getPixel(BG, x - 1, y + 1), pos: 'd'});
+            }
+            if (x < width - 1 && y < height - 1 && BGComputed[(y + 1) * width + (x + 1)]) {
+              neighbors.push({val: getPixel(BG, x + 1, y + 1), pos: 'd'});
+            }
+          }
+          
+          if (neighbors.length >= 2) {
+            const hNeighbors = neighbors.filter(n => n.pos === 'h').map(n => n.val);
+            const vNeighbors = neighbors.filter(n => n.pos === 'v').map(n => n.val);
+            
+            let gradH = 0, gradV = 0;
+            if (hNeighbors.length >= 2) {
+              gradH = Math.abs(hNeighbors[0] - hNeighbors[1]);
+            }
+            if (vNeighbors.length >= 2) {
+              gradV = Math.abs(vNeighbors[0] - vNeighbors[1]);
+            }
+            
+            if (gradH < gradV && vNeighbors.length >= 2) {
+              BG[y * width + x] = vNeighbors.reduce((a, b) => a + b, 0) / vNeighbors.length;
+              BGComputed[y * width + x] = 1;
+            } else if (gradV < gradH && hNeighbors.length >= 2) {
+              BG[y * width + x] = hNeighbors.reduce((a, b) => a + b, 0) / hNeighbors.length;
+              BGComputed[y * width + x] = 1;
+            } else if (neighbors.length > 0) {
+              // Isotropic
+              BG[y * width + x] = neighbors.reduce((a, b) => a + b.val, 0) / neighbors.length;
+              BGComputed[y * width + x] = 1;
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  // Step 6: Reconstruct full R and B from RG, BG and G
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = (y * width + x) * 4;
+      const g = G[y * width + x];
+      const r = RG[y * width + x] + g;
+      const b = BG[y * width + x] + g;
       
       output.data[idx] = clamp(r);
       output.data[idx + 1] = clamp(g);

@@ -1145,13 +1145,13 @@ export function InteractiveDemosaicVisualizer({
       return input.cfaData[y * width + x];
     };
     
-    const rPixels: Array<{x: number, y: number}> = [];
-    const gPixels: Array<{x: number, y: number}> = [];
-    const bPixels: Array<{x: number, y: number}> = [];
+    const rPixels: Array<{x: number, y: number, dominant?: boolean}> = [];
+    const gPixels: Array<{x: number, y: number, dominant?: boolean}> = [];
+    const bPixels: Array<{x: number, y: number, dominant?: boolean}> = [];
     
     // Helper function to collect neighbors
     const collectNeighbors = (targetColor: 'r' | 'g' | 'b', maxRadius: number = 10) => {
-        const result: Array<{x: number, y: number}> = [];
+        const result: Array<{x: number, y: number, dominant?: boolean}> = [];
         for (let dy = -maxRadius; dy <= maxRadius; dy++) {
             for (let dx = -maxRadius; dx <= maxRadius; dx++) {
                 if (dx === 0 && dy === 0) continue;
@@ -1237,17 +1237,17 @@ export function InteractiveDemosaicVisualizer({
       }
     } else if (algorithm === 'bilinear') {
       // Use collectNeighbors with radius 1 to match actual implementation
-      if (centerCh === 'g') {
+          if (centerCh === 'g') {
         const rNeighbors = collectNeighbors('r', 1);
         const bNeighbors = collectNeighbors('b', 1);
         rPixels.push(...rNeighbors);
         bPixels.push(...bNeighbors);
-      } else if (centerCh === 'r') {
+          } else if (centerCh === 'r') {
         const gNeighbors = collectNeighbors('g', 1);
         const bNeighbors = collectNeighbors('b', 1);
         gPixels.push(...gNeighbors);
         bPixels.push(...bNeighbors);
-      } else { // Blue
+          } else { // Blue
         const gNeighbors = collectNeighbors('g', 1);
         const rNeighbors = collectNeighbors('r', 1);
         gPixels.push(...gNeighbors);
@@ -1301,12 +1301,12 @@ export function InteractiveDemosaicVisualizer({
           // Bayer: use specific neighbors based on row type
           const rNeighbors = collectNeighbors('r', searchRadius);
           const bNeighbors = collectNeighbors('b', searchRadius);
-          const leftCh = getChannel(gx - 1, gy);
-          const isRedRow = (leftCh === 'r' || getChannel(gx + 1, gy) === 'r');
-          if (isRedRow) {
+        const leftCh = getChannel(gx - 1, gy);
+        const isRedRow = (leftCh === 'r' || getChannel(gx + 1, gy) === 'r');
+        if (isRedRow) {
             rPixels.push(...rNeighbors.filter(p => p.y === gy));
             bPixels.push(...bNeighbors.filter(p => p.x === gx));
-          } else {
+        } else {
             rPixels.push(...rNeighbors.filter(p => p.x === gx));
             bPixels.push(...bNeighbors.filter(p => p.y === gy));
           }
@@ -1319,27 +1319,157 @@ export function InteractiveDemosaicVisualizer({
         const bCorners = collectNeighbors('b', 1).filter(p => 
           (p.x === gx - 1 || p.x === gx + 1) && (p.y === gy - 1 || p.y === gy + 1)
         );
-        gPixels.push(...gNeighbors);
+        
+        // Compute edge direction for green interpolation
+        const gH = gNeighbors.filter(p => p.y === gy);
+        const gV = gNeighbors.filter(p => p.x === gx);
+        let diffH = 0, diffV = 0;
+        if (gH.length >= 2) {
+          const leftG = gH.find(p => p.x < gx);
+          const rightG = gH.find(p => p.x > gx);
+          if (leftG && rightG) {
+            diffH = Math.abs(getVal(leftG.x, leftG.y) - getVal(rightG.x, rightG.y));
+          }
+        }
+        if (gV.length >= 2) {
+          const topG = gV.find(p => p.y < gy);
+          const bottomG = gV.find(p => p.y > gy);
+          if (topG && bottomG) {
+            diffV = Math.abs(getVal(topG.x, topG.y) - getVal(bottomG.x, bottomG.y));
+          }
+        }
+        
+        // Mark dominant green neighbors: if diffH < diffV, horizontal is smoother, use horizontal neighbors
+        // We interpolate along the smoother direction (perpendicular to the edge)
+        const useHorizontal = diffH < diffV;
+        gNeighbors.forEach(p => {
+          const isHorizontal = (p.y === gy);
+          p.dominant = useHorizontal ? isHorizontal : !isHorizontal;
+          gPixels.push(p);
+        });
+        
         bPixels.push(...bCorners);
       } else if (centerCh === 'b') {
         const gNeighbors = collectNeighbors('g', 1);
         const rCorners = collectNeighbors('r', 1).filter(p => 
           (p.x === gx - 1 || p.x === gx + 1) && (p.y === gy - 1 || p.y === gy + 1)
         );
-        gPixels.push(...gNeighbors);
+        
+        // Compute edge direction for green interpolation
+        const gH = gNeighbors.filter(p => p.y === gy);
+        const gV = gNeighbors.filter(p => p.x === gx);
+        let diffH = 0, diffV = 0;
+        if (gH.length >= 2) {
+          const leftG = gH.find(p => p.x < gx);
+          const rightG = gH.find(p => p.x > gx);
+          if (leftG && rightG) {
+            diffH = Math.abs(getVal(leftG.x, leftG.y) - getVal(rightG.x, rightG.y));
+          }
+        }
+        if (gV.length >= 2) {
+          const topG = gV.find(p => p.y < gy);
+          const bottomG = gV.find(p => p.y > gy);
+          if (topG && bottomG) {
+            diffV = Math.abs(getVal(topG.x, topG.y) - getVal(bottomG.x, bottomG.y));
+          }
+        }
+        
+        // Mark dominant green neighbors: if diffH < diffV, horizontal is smoother, use horizontal neighbors
+        // We interpolate along the smoother direction (perpendicular to the edge)
+        const useHorizontal = diffH < diffV;
+        gNeighbors.forEach(p => {
+          const isHorizontal = (p.y === gy);
+          p.dominant = useHorizontal ? isHorizontal : !isHorizontal;
+          gPixels.push(p);
+        });
+        
         rPixels.push(...rCorners);
       } else { // Green
-        const rNeighbors = collectNeighbors('r', 1);
-        const bNeighbors = collectNeighbors('b', 1);
+        // For green pixels, we interpolate RG and BG planes using edge detection
+        // Collect all red and blue neighbors within radius 2 to include diagonals
+        const rNeighbors = collectNeighbors('r', 2);
+        const bNeighbors = collectNeighbors('b', 2);
+        
+        // Compute edge direction from RG plane (using red neighbors as proxy)
+        // For Bayer: at green pixels, we need to estimate edge direction
+        // Use immediate neighbors to determine edge direction
+        const rH = rNeighbors.filter(p => p.y === gy);
+        const rV = rNeighbors.filter(p => p.x === gx);
+        const bH = bNeighbors.filter(p => p.y === gy);
+        const bV = bNeighbors.filter(p => p.x === gx);
+        
+        // Estimate gradients from available neighbors
+        let diffH = 0, diffV = 0;
+        if (rH.length >= 2) {
+          const leftR = rH.find(p => p.x < gx);
+          const rightR = rH.find(p => p.x > gx);
+          if (leftR && rightR) {
+            diffH = Math.abs(getVal(leftR.x, leftR.y) - getVal(rightR.x, rightR.y));
+          }
+        }
+        if (rV.length >= 2) {
+          const topR = rV.find(p => p.y < gy);
+          const bottomR = rV.find(p => p.y > gy);
+          if (topR && bottomR) {
+            diffV = Math.abs(getVal(topR.x, topR.y) - getVal(bottomR.x, bottomR.y));
+          }
+        }
+        
+        // If we can't determine from red neighbors, try blue
+        if (diffH === 0 && diffV === 0) {
+          if (bH.length >= 2) {
+            const leftB = bH.find(p => p.x < gx);
+            const rightB = bH.find(p => p.x > gx);
+            if (leftB && rightB) {
+              diffH = Math.abs(getVal(leftB.x, leftB.y) - getVal(rightB.x, rightB.y));
+            }
+          }
+          if (bV.length >= 2) {
+            const topB = bV.find(p => p.y < gy);
+            const bottomB = bV.find(p => p.y > gy);
+            if (topB && bottomB) {
+              diffV = Math.abs(getVal(topB.x, topB.y) - getVal(bottomB.x, bottomB.y));
+            }
+          }
+        }
+        
+        // Determine dominant direction: if diffH < diffV, horizontal is smoother, so edge is vertical (use H direction)
+        const useHorizontal = diffH < diffV;
         const leftCh = getChannel(gx - 1, gy);
         const isRedRow = (leftCh === 'r' || getChannel(gx + 1, gy) === 'r');
-        if (isRedRow) {
-          rPixels.push(...rNeighbors.filter(p => p.y === gy));
-          bPixels.push(...bNeighbors.filter(p => p.x === gx));
-        } else {
-          rPixels.push(...rNeighbors.filter(p => p.x === gx));
-          bPixels.push(...bNeighbors.filter(p => p.y === gy));
-        }
+        
+        // Mark dominant pixels based on edge direction and row type
+        // For red: in red row, horizontal neighbors; in blue row, vertical neighbors
+        // For blue: in red row, vertical neighbors; in blue row, horizontal neighbors
+        rNeighbors.forEach(p => {
+          const isHorizontal = (p.y === gy);
+          const isVertical = (p.x === gx);
+          let isDominant = false;
+          
+          if (isRedRow) {
+            // Red row: R is horizontal, B is vertical
+            isDominant = useHorizontal && isHorizontal;
+          } else {
+            // Blue row: R is vertical, B is horizontal
+            isDominant = !useHorizontal && isVertical;
+          }
+          rPixels.push({...p, dominant: isDominant});
+        });
+        
+        bNeighbors.forEach(p => {
+          const isHorizontal = (p.y === gy);
+          const isVertical = (p.x === gx);
+          let isDominant = false;
+          
+          if (isRedRow) {
+            // Red row: R is horizontal, B is vertical
+            isDominant = !useHorizontal && isVertical;
+          } else {
+            // Blue row: R is vertical, B is horizontal
+            isDominant = useHorizontal && isHorizontal;
+          }
+          bPixels.push({...p, dominant: isDominant});
+        });
       }
     } else if (algorithm === 'wu_polynomial') {
       // Polynomial interpolation uses all neighbors within search radius (maxRadius = 5)
@@ -1451,7 +1581,7 @@ export function InteractiveDemosaicVisualizer({
              const centerY = localCursorY * scaleY + scaleY / 2;
              
              // Draw arrows to contributing pixels
-             const drawArrow = (fromGlobalX: number, fromGlobalY: number, toGlobalX: number, toGlobalY: number, color: string) => {
+             const drawArrow = (fromGlobalX: number, fromGlobalY: number, toGlobalX: number, toGlobalY: number, color: string, lineWidth: number = 2) => {
                  // Convert to local coordinates
                  const fromLocalX = fromGlobalX - regionOriginX;
                  const fromLocalY = fromGlobalY - regionOriginY;
@@ -1483,7 +1613,7 @@ export function InteractiveDemosaicVisualizer({
                 
                 // Draw arrow line - extends all the way to the arrowhead base
                 ctx.strokeStyle = color;
-                ctx.lineWidth = 2;
+                ctx.lineWidth = lineWidth;
                 ctx.beginPath();
                 ctx.moveTo(fx, fy);
                 ctx.lineTo(arrowHeadBaseX, arrowHeadBaseY);
@@ -1503,26 +1633,50 @@ export function InteractiveDemosaicVisualizer({
                 );
                 ctx.closePath();
                 ctx.fill();
+                
+                // Draw a highlight circle for dominant pixels
+                if (lineWidth > 2) {
+                    ctx.strokeStyle = '#ffff00'; // Yellow highlight
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.arc(tx, ty, Math.max(scaleX * 0.3, 3), 0, Math.PI * 2);
+                    ctx.stroke();
+                }
              };
              
-             // Draw red arrows
-             contributingPixels.rPixels.forEach(pixel => {
+             // Draw red arrows (non-dominant first, then dominant on top)
+             contributingPixels.rPixels.filter(p => !p.dominant).forEach(pixel => {
                  if (pixel.x !== globalCursorX || pixel.y !== globalCursorY) {
-                     drawArrow(globalCursorX, globalCursorY, pixel.x, pixel.y, '#ff0000');
+                     drawArrow(globalCursorX, globalCursorY, pixel.x, pixel.y, '#ff0000', 2);
+                 }
+             });
+             contributingPixels.rPixels.filter(p => p.dominant === true).forEach(pixel => {
+                 if (pixel.x !== globalCursorX || pixel.y !== globalCursorY) {
+                     drawArrow(globalCursorX, globalCursorY, pixel.x, pixel.y, '#ff0000', 4);
                  }
              });
              
              // Draw green arrows
-             contributingPixels.gPixels.forEach(pixel => {
+             contributingPixels.gPixels.filter(p => !p.dominant).forEach(pixel => {
                  if (pixel.x !== globalCursorX || pixel.y !== globalCursorY) {
-                     drawArrow(globalCursorX, globalCursorY, pixel.x, pixel.y, '#00ff00');
+                     drawArrow(globalCursorX, globalCursorY, pixel.x, pixel.y, '#00ff00', 2);
+                 }
+             });
+             contributingPixels.gPixels.filter(p => p.dominant === true).forEach(pixel => {
+                 if (pixel.x !== globalCursorX || pixel.y !== globalCursorY) {
+                     drawArrow(globalCursorX, globalCursorY, pixel.x, pixel.y, '#00ff00', 4);
                  }
              });
              
-             // Draw blue arrows
-             contributingPixels.bPixels.forEach(pixel => {
+             // Draw blue arrows (non-dominant first, then dominant on top)
+             contributingPixels.bPixels.filter(p => !p.dominant).forEach(pixel => {
                  if (pixel.x !== globalCursorX || pixel.y !== globalCursorY) {
-                     drawArrow(globalCursorX, globalCursorY, pixel.x, pixel.y, '#0000ff');
+                     drawArrow(globalCursorX, globalCursorY, pixel.x, pixel.y, '#0000ff', 2);
+                 }
+             });
+             contributingPixels.bPixels.filter(p => p.dominant === true).forEach(pixel => {
+                 if (pixel.x !== globalCursorX || pixel.y !== globalCursorY) {
+                     drawArrow(globalCursorX, globalCursorY, pixel.x, pixel.y, '#0000ff', 4);
                  }
              });
              
@@ -1828,7 +1982,7 @@ export function InteractiveDemosaicVisualizer({
                 neighborData.gNeighbors = [...greenH, ...greenV];
                 const gH = greenH.length > 0 ? greenH.reduce((sum, p) => sum + p.val, 0) / greenH.length : 0;
                 const gV = greenV.length > 0 ? greenV.reduce((sum, p) => sum + p.val, 0) / greenV.length : 0;
-                greenInterp = (gH * nH + gV * nV) / (nH + nV);
+            greenInterp = (gH * nH + gV * nV) / (nH + nV);
             }
         }
         if (centerCh === 'r') {
@@ -1848,7 +2002,7 @@ export function InteractiveDemosaicVisualizer({
                 neighborData.bNeighbors = bCorners;
                 const bMinusG = bCorners.map(p => p.val - greenInterp);
                 const avgBMinusG = bMinusG.length > 0 ? bMinusG.reduce((a, b) => a + b, 0) / bMinusG.length : 0;
-                b = g + avgBMinusG;
+            b = g + avgBMinusG;
             }
         } else if (centerCh === 'b') {
             b = centerVal;
@@ -1867,7 +2021,7 @@ export function InteractiveDemosaicVisualizer({
                 neighborData.rNeighbors = rCorners;
                 const rMinusG = rCorners.map(p => p.val - greenInterp);
                 const avgRMinusG = rMinusG.length > 0 ? rMinusG.reduce((a, b) => a + b, 0) / rMinusG.length : 0;
-                r = g + avgRMinusG;
+            r = g + avgRMinusG;
             }
         } else {
             g = centerVal;
@@ -1885,16 +2039,16 @@ export function InteractiveDemosaicVisualizer({
                 // Bayer: use specific neighbors based on row type
                 const rNeighbors = collectNeighbors('r', searchRadius).positions;
                 const bNeighbors = collectNeighbors('b', searchRadius).positions;
-                const leftCh = getChannel(gx - 1, gy);
-                const isRedRow = (leftCh === 'r' || getChannel(gx + 1, gy) === 'r');
-                if (isRedRow) {
+            const leftCh = getChannel(gx - 1, gy);
+            const isRedRow = (leftCh === 'r' || getChannel(gx + 1, gy) === 'r');
+            if (isRedRow) {
                     neighborData.rNeighbors = rNeighbors.filter(p => p.y === gy);
                     neighborData.bNeighbors = bNeighbors.filter(p => p.x === gx);
                     const rVals = neighborData.rNeighbors.map(p => p.val);
                     const bVals = neighborData.bNeighbors.map(p => p.val);
                     r = rVals.length > 0 ? rVals.reduce((a, b) => a + b, 0) / rVals.length : 0;
                     b = bVals.length > 0 ? bVals.reduce((a, b) => a + b, 0) / bVals.length : 0;
-                } else {
+            } else {
                     neighborData.rNeighbors = rNeighbors.filter(p => p.x === gx);
                     neighborData.bNeighbors = bNeighbors.filter(p => p.y === gy);
                     const rVals = neighborData.rNeighbors.map(p => p.val);
@@ -1959,9 +2113,9 @@ export function InteractiveDemosaicVisualizer({
                 const bAll = collectNeighbors('b', searchRadiusRB).positions;
                 neighborData.bNeighbors = bAll;
                 // For green, use edge-aware selection from immediate neighbors
-                if (diffH < diffV) {
+            if (diffH < diffV) {
                     neighborData.gNeighbors = gNeighbors.filter(p => p.y === gy);
-                } else {
+            } else {
                     neighborData.gNeighbors = gNeighbors.filter(p => p.x === gx);
                 }
                 const gVals = neighborData.gNeighbors.map(p => p.val);
@@ -1983,7 +2137,7 @@ export function InteractiveDemosaicVisualizer({
                 g = gVals.length > 0 ? gVals.reduce((a, b) => a + b, 0) / gVals.length : 0;
                 const avgB = bCorners.length > 0 ? bCorners.reduce((sum, p) => sum + p.val, 0) / bCorners.length : 0;
                 const avgG = gNeighbors.length > 0 ? gNeighbors.reduce((sum, p) => sum + p.val, 0) / gNeighbors.length : 0;
-                b = avgB + (g - avgG);
+            b = avgB + (g - avgG);
             }
         } else {
             b = centerVal;
@@ -1995,9 +2149,9 @@ export function InteractiveDemosaicVisualizer({
                 const rAll = collectNeighbors('r', searchRadiusRB).positions;
                 neighborData.rNeighbors = rAll;
                 // For green, use edge-aware selection from immediate neighbors
-                if (diffH < diffV) {
+            if (diffH < diffV) {
                     neighborData.gNeighbors = gNeighbors.filter(p => p.y === gy);
-                } else {
+            } else {
                     neighborData.gNeighbors = gNeighbors.filter(p => p.x === gx);
                 }
                 const gVals = neighborData.gNeighbors.map(p => p.val);
@@ -2019,7 +2173,7 @@ export function InteractiveDemosaicVisualizer({
                 g = gVals.length > 0 ? gVals.reduce((a, b) => a + b, 0) / gVals.length : 0;
                 const avgR = rCorners.length > 0 ? rCorners.reduce((sum, p) => sum + p.val, 0) / rCorners.length : 0;
                 const avgG = gNeighbors.length > 0 ? gNeighbors.reduce((sum, p) => sum + p.val, 0) / gNeighbors.length : 0;
-                r = avgR + (g - avgG);
+            r = avgR + (g - avgG);
             }
         }
     } else if (algorithm === 'wu_polynomial') {
@@ -2170,7 +2324,7 @@ export function InteractiveDemosaicVisualizer({
             result: `${rVals.map(v => `(${v}, 0, 0)`).join(', ')} → ${to255(r)}`
           });
         }
-      } else {
+        } else {
         if (neighborData.rNeighbors && neighborData.rNeighbors.length > 0) {
           const rVals = neighborData.rNeighbors.map(n => to255(n.val));
           breakdown.push({
@@ -2215,7 +2369,7 @@ export function InteractiveDemosaicVisualizer({
       } else if (centerCh === 'r') {
         if (neighborData.gNeighbors && neighborData.gNeighbors.length > 0) {
           const gVals = neighborData.gNeighbors.map(n => to255(n.val));
-          breakdown.push({
+        breakdown.push({
             step: '2. Interpolate Green',
             description: `Average of ${neighborData.gNeighbors.length} green neighbor${neighborData.gNeighbors.length > 1 ? 's' : ''}`,
             formula: `Ĝ = (${gVals.join(' + ')}) / ${neighborData.gNeighbors.length}`,
@@ -2224,7 +2378,7 @@ export function InteractiveDemosaicVisualizer({
         }
         if (neighborData.bNeighbors && neighborData.bNeighbors.length > 0) {
           const bVals = neighborData.bNeighbors.map(n => to255(n.val));
-          breakdown.push({
+        breakdown.push({
             step: '3. Interpolate Blue',
             description: `Average of ${neighborData.bNeighbors.length} blue neighbor${neighborData.bNeighbors.length > 1 ? 's' : ''}`,
             formula: `B̂ = (${bVals.join(' + ')}) / ${neighborData.bNeighbors.length}`,
@@ -2234,7 +2388,7 @@ export function InteractiveDemosaicVisualizer({
       } else { // Blue
         if (neighborData.gNeighbors && neighborData.gNeighbors.length > 0) {
           const gVals = neighborData.gNeighbors.map(n => to255(n.val));
-          breakdown.push({
+        breakdown.push({
             step: '2. Interpolate Green',
             description: `Average of ${neighborData.gNeighbors.length} green neighbor${neighborData.gNeighbors.length > 1 ? 's' : ''}`,
             formula: `Ĝ = (${gVals.join(' + ')}) / ${neighborData.gNeighbors.length}`,
@@ -2243,7 +2397,7 @@ export function InteractiveDemosaicVisualizer({
         }
         if (neighborData.rNeighbors && neighborData.rNeighbors.length > 0) {
           const rVals = neighborData.rNeighbors.map(n => to255(n.val));
-          breakdown.push({
+        breakdown.push({
             step: '3. Interpolate Red',
             description: `Average of ${neighborData.rNeighbors.length} red neighbor${neighborData.rNeighbors.length > 1 ? 's' : ''}`,
             formula: `R̂ = (${rVals.join(' + ')}) / ${neighborData.rNeighbors.length}`,
@@ -2273,9 +2427,9 @@ export function InteractiveDemosaicVisualizer({
       });
       
       // Always show normalized edge weights after computing wH and wV
-      const sumW = wH + wV;
-      const nH = (sumW > 0) ? (1.0 - wH / sumW) : 0.5;
-      const nV = (sumW > 0) ? (1.0 - wV / sumW) : 0.5;
+        const sumW = wH + wV;
+        const nH = (sumW > 0) ? (1.0 - wH / sumW) : 0.5;
+        const nV = (sumW > 0) ? (1.0 - wV / sumW) : 0.5;
       
       breakdown.push({
         step: '3a. Compute Normalized Edge Weights',
@@ -2298,10 +2452,10 @@ export function InteractiveDemosaicVisualizer({
           const gV = greenV.length > 0 ? greenV.reduce((sum, n) => sum + n.val, 0) / greenV.length : 0;
           const gInterp = (gH * nH + gV * nV) / (nH + nV);
           
-          breakdown.push({
-            step: '4. Edge-Aware Green Interpolation',
+        breakdown.push({
+          step: '4. Edge-Aware Green Interpolation',
             description: `Weighted average: ${greenH.length} horizontal green neighbors × n_H + ${greenV.length} vertical green neighbors × n_V`,
-            formula: `Ĝ = (G_H × n_H + G_V × n_V) / (n_H + n_V)`,
+          formula: `Ĝ = (G_H × n_H + G_V × n_V) / (n_H + n_V)`,
             result: `G_H = avg(${gHVals.length > 0 ? gHVals.map(v => `(0, ${v}, 0)`).join(', ') : 'none'}) = (0, ${to255(gH)}, 0), G_V = avg(${gVVals.length > 0 ? gVVals.map(v => `(0, ${v}, 0)`).join(', ') : 'none'}) = (0, ${to255(gV)}, 0) → Ĝ = (0, ${to255(gInterp)}, 0)`
           });
         }
@@ -2357,7 +2511,7 @@ export function InteractiveDemosaicVisualizer({
       const degree = params?.wuPolynomialDegree ?? 2;
       if (neighborData.gNeighbors && neighborData.gNeighbors.length > 0 && centerCh !== 'g') {
         const gVals = neighborData.gNeighbors.map(n => to255(n.val));
-        breakdown.push({
+      breakdown.push({
           step: '2. Polynomial Green Interpolation',
           description: `Degree-${degree} polynomial interpolation using ${neighborData.gNeighbors.length} green neighbors`,
           formula: `Ĝ = Σ(w_i × G_i) / Σ(w_i), where w_i = 1 / (1 + d_i^${degree})`,
@@ -2406,28 +2560,35 @@ export function InteractiveDemosaicVisualizer({
       // Compute edge direction for all cases
       const diffH = Math.abs(getVal(gx - 1, gy) - getVal(gx + 1, gy));
       const diffV = Math.abs(getVal(gx, gy - 1) - getVal(gx, gy + 1));
+      // If diffH < diffV, horizontal variation is less (horizontal is smoother), so edge is horizontal
+      // If diffV < diffH, vertical variation is less (vertical is smoother), so edge is vertical
       const edgeDirection = diffH < diffV ? 'horizontal' : 'vertical';
-      const preferredDir = diffH < diffV ? 'H' : 'V';
+      // We interpolate along the smoother direction (same as edge direction in this interpretation)
+      const interpolateDir = diffH < diffV ? 'horizontal' : 'vertical';
       
       breakdown.push({
         step: '2. Detect Edge Direction',
         description: 'Compare horizontal and vertical intensity differences to determine edge orientation',
         formula: `Δ_H = |I(${gx-1}, ${gy}) - I(${gx+1}, ${gy})|, Δ_V = |I(${gx}, ${gy-1}) - I(${gx}, ${gy+1})|`,
-        result: `Δ_H = ${diffH.toFixed(4)}, Δ_V = ${diffV.toFixed(4)} → Edge is ${edgeDirection} (use ${preferredDir} neighbors)`
+        result: `Δ_H = ${diffH.toFixed(4)}, Δ_V = ${diffV.toFixed(4)} → **Edge is ${edgeDirection}, interpolate along ${interpolateDir} direction** (lower variation = smoother)`
       });
       
       if (neighborData.gNeighbors && neighborData.gNeighbors.length > 0 && centerCh !== 'g') {
         // Separate neighbors by direction
         const gNeighborsH = neighborData.gNeighbors.filter(n => n.y === gy);
         const gNeighborsV = neighborData.gNeighbors.filter(n => n.x === gx);
+        // If diffH < diffV, horizontal is smoother, so interpolate along horizontal direction (use horizontal neighbors)
+        // If diffV < diffH, vertical is smoother, so interpolate along vertical direction (use vertical neighbors)
+        // We interpolate along the smoother direction (perpendicular to the edge)
         const usedNeighbors = diffH < diffV ? gNeighborsH : gNeighborsV;
+        const usedDir = diffH < diffV ? 'horizontal' : 'vertical';
         const gVals = usedNeighbors.map(n => to255(n.val));
         const avgG = usedNeighbors.length > 0 ? usedNeighbors.reduce((sum, n) => sum + n.val, 0) / usedNeighbors.length : 0;
         
         breakdown.push({
           step: '3. Edge-Aware Green Interpolation',
-          description: `Use ${usedNeighbors.length} green neighbor${usedNeighbors.length > 1 ? 's' : ''} in ${edgeDirection} direction (lower variation)`,
-          formula: `Ĝ = average(G_neighbors in ${preferredDir} direction)`,
+          description: `**Using ${usedNeighbors.length} green neighbor${usedNeighbors.length > 1 ? 's' : ''} in ${usedDir} direction** (${diffH < diffV ? 'horizontal' : 'vertical'} is smoother, edge is ${edgeDirection})`,
+          formula: `Ĝ = average(G_neighbors in ${usedDir} direction)`,
           result: `${gVals.map(v => `(0, ${v}, 0)`).join(', ')} → (0, ${to255(avgG)}, 0)`
         });
       }
@@ -2490,12 +2651,13 @@ export function InteractiveDemosaicVisualizer({
           const rVals = usedRNeighbors.map(n => to255(n.val));
           const avgR = usedRNeighbors.length > 0 ? usedRNeighbors.reduce((sum, n) => sum + n.val, 0) / usedRNeighbors.length : 0;
           
-          breakdown.push({
-            step: '3. Edge-Aware Red Interpolation',
-            description: `Use ${usedRNeighbors.length} red neighbor${usedRNeighbors.length > 1 ? 's' : ''} in ${edgeDirection} direction (${isRedRow ? 'red' : 'blue'} row)`,
-            formula: `R̂ = average(R_neighbors in preferred direction)`,
-            result: `${rVals.map(v => `(${v}, 0, 0)`).join(', ')} → (${to255(avgR)}, 0, 0)`
-          });
+        const rDir = isRedRow ? (diffH < diffV ? 'horizontal' : 'vertical') : (diffH < diffV ? 'vertical' : 'horizontal');
+        breakdown.push({
+          step: '3. Edge-Aware Red Interpolation',
+          description: `**Using ${usedRNeighbors.length} red neighbor${usedRNeighbors.length > 1 ? 's' : ''} in ${rDir} direction** (${isRedRow ? 'red' : 'blue'} row, ${edgeDirection} edge)`,
+          formula: `R̂ = average(R_neighbors in ${rDir} direction)`,
+          result: `${rVals.map(v => `(${v}, 0, 0)`).join(', ')} → (${to255(avgR)}, 0, 0)`
+        });
         }
         if (neighborData.bNeighbors && neighborData.bNeighbors.length > 0) {
           // Separate B neighbors by direction based on edge and row type
@@ -2510,10 +2672,11 @@ export function InteractiveDemosaicVisualizer({
           const bVals = usedBNeighbors.map(n => to255(n.val));
           const avgB = usedBNeighbors.length > 0 ? usedBNeighbors.reduce((sum, n) => sum + n.val, 0) / usedBNeighbors.length : 0;
           
+          const bDir = isRedRow ? (diffH < diffV ? 'vertical' : 'horizontal') : (diffH < diffV ? 'horizontal' : 'vertical');
           breakdown.push({
             step: '4. Edge-Aware Blue Interpolation',
-            description: `Use ${usedBNeighbors.length} blue neighbor${usedBNeighbors.length > 1 ? 's' : ''} in ${edgeDirection === 'horizontal' ? 'vertical' : 'horizontal'} direction (${isRedRow ? 'red' : 'blue'} row)`,
-            formula: `B̂ = average(B_neighbors in preferred direction)`,
+            description: `**Using ${usedBNeighbors.length} blue neighbor${usedBNeighbors.length > 1 ? 's' : ''} in ${bDir} direction** (${isRedRow ? 'red' : 'blue'} row, ${edgeDirection} edge)`,
+            formula: `B̂ = average(B_neighbors in ${bDir} direction)`,
             result: `${bVals.map(v => `(0, 0, ${v})`).join(', ')} → (0, 0, ${to255(avgB)})`
           });
         }
@@ -2522,7 +2685,7 @@ export function InteractiveDemosaicVisualizer({
       const iterations = params?.kikuResidualIterations ?? 1;
       if (neighborData.gNeighbors && neighborData.gNeighbors.length > 0 && centerCh !== 'g') {
         const gVals = neighborData.gNeighbors.map(n => to255(n.val));
-        breakdown.push({
+      breakdown.push({
           step: '2. Initial Bilinear Green Estimate',
           description: `Bilinear interpolation using ${neighborData.gNeighbors.length} green neighbor${neighborData.gNeighbors.length > 1 ? 's' : ''}`,
           formula: 'Ĝ₀ = Bilinear(G_neighbors)',
@@ -2531,7 +2694,7 @@ export function InteractiveDemosaicVisualizer({
       }
       if (neighborData.bNeighbors && neighborData.bNeighbors.length > 0 && centerCh === 'r') {
         const bVals = neighborData.bNeighbors.map(n => to255(n.val));
-        breakdown.push({
+      breakdown.push({
           step: '3. Initial Bilinear Blue Estimate',
           description: `Bilinear interpolation using ${neighborData.bNeighbors.length} blue neighbor${neighborData.bNeighbors.length > 1 ? 's' : ''}`,
           formula: 'B̂₀ = Bilinear(B_neighbors)',
@@ -2571,9 +2734,9 @@ export function InteractiveDemosaicVisualizer({
         breakdown.push({
           step: '4. Residual Interpolation',
           description: `Interpolate residuals for ${iterations - 1} additional iteration(s)`,
-          formula: 'R = I_observed - Î₀, then Î = Î₀ + Interp(R)',
+        formula: 'R = I_observed - Î₀, then Î = Î₀ + Interp(R)',
           result: `Refined estimate after ${iterations} total iteration(s)`
-        });
+      });
       }
     }
     
@@ -2635,7 +2798,15 @@ export function InteractiveDemosaicVisualizer({
           {calculationBreakdown.map((step, idx) => (
             <div key={idx} className="space-y-1">
               <div className="text-xs font-medium text-foreground">{step.step}</div>
-              <div className="text-[11px] text-muted-foreground">{step.description}</div>
+              <div className="text-[11px] text-muted-foreground">
+                {step.description.split(/(\*\*.*?\*\*)/).map((part, i) => 
+                  part.startsWith('**') && part.endsWith('**') ? (
+                    <span key={i} className="font-bold text-foreground">{part.slice(2, -2)}</span>
+                  ) : (
+                    <span key={i}>{part}</span>
+                  )
+                )}
+              </div>
               {step.formula && (
                 <div className="text-[10px] font-mono bg-background/50 px-2 py-1 rounded border border-border/30">
                   {step.formula}
