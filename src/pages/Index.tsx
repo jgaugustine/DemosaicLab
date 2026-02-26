@@ -26,9 +26,12 @@ import {
 } from '@/lib/demosaic';
 import { decodeDNG } from '@/lib/dngDecode';
 import { createZonePlate, createFineCheckerboard, createColorSweep, createStarburst, createDiagonalLines, createSineWaveGratings, createColorPatches, createColorFringes } from '@/lib/synthetic';
-import { Upload, Image as ImageIcon, FileCode, Grid3X3, ZoomIn, ZoomOut, RefreshCcw, Grid, Columns, Loader2 } from 'lucide-react';
+import { Upload, Image as ImageIcon, FileCode, Grid3X3, ZoomIn, ZoomOut, RefreshCcw, Grid, Columns, Loader2, HelpCircle } from 'lucide-react';
 import { downsizeImageToDataURL } from '@/lib/imageResize';
 import { HelpTooltip } from '@/components/ui/HelpTooltip';
+import { TutorialTour } from '@/components/TutorialTour';
+import { tutorialSteps, getFirstTutorialStepId } from '@/config/tutorialSteps';
+import type { TutorialStep } from '@/config/tutorialSteps';
 
 // Viewport configuration type
 type ViewportConfig = {
@@ -100,6 +103,31 @@ export default function Index() {
   const [isFit, setIsFit] = useState(true);
   const isAnyProcessing = isProcessing1 || isProcessing2;
   const [showProcessingOverlay, setShowProcessingOverlay] = useState(false);
+
+  // Tutorial tour state
+  const TOUR_SEEN_KEY = "demosaiclab:tour-seen";
+  const [tourStepId, setTourStepId] = useState<TutorialStep["id"] | null>(() => {
+    if (typeof sessionStorage !== "undefined" && sessionStorage.getItem(TOUR_SEEN_KEY)) return null;
+    return getFirstTutorialStepId();
+  });
+  const advanceTour = useCallback(() => {
+    setTourStepId((prev) => {
+      const idx = tutorialSteps.findIndex((s) => s.id === prev);
+      if (idx === -1 || idx >= tutorialSteps.length - 1) return null;
+      return tutorialSteps[idx + 1].id;
+    });
+  }, []);
+  const backTour = useCallback(() => {
+    setTourStepId((prev) => {
+      const idx = tutorialSteps.findIndex((s) => s.id === prev);
+      if (idx <= 0) return prev;
+      return tutorialSteps[idx - 1].id;
+    });
+  }, []);
+  const closeTour = useCallback(() => {
+    setTourStepId(null);
+    try { sessionStorage.setItem(TOUR_SEEN_KEY, "1"); } catch {}
+  }, []);
   
   // Helper to get algorithm display name (defined early to avoid initialization order issues)
   const getAlgorithmName = (algo: DemosaicAlgorithm): string => {
@@ -1211,13 +1239,35 @@ export default function Index() {
 
   return (
     <div className="h-screen bg-background text-foreground flex flex-col overflow-hidden">
+      <TutorialTour
+        steps={tutorialSteps}
+        currentStepId={tourStepId}
+        onNext={advanceTour}
+        onBack={backTour}
+        onSkip={closeTour}
+        onComplete={closeTour}
+      />
+      <div className="flex items-center justify-between px-4 pt-2 pb-1">
+        <span className="text-lg font-bold">DemosaicLab</span>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => {
+            try { sessionStorage.removeItem(TOUR_SEEN_KEY); } catch {}
+            setTourStepId(getFirstTutorialStepId());
+          }}
+          title="Start tour"
+        >
+          <HelpCircle className="w-5 h-5" />
+        </Button>
+      </div>
       <main className="flex-1 p-4 lg:p-6 min-h-0 pt-2">
         <div className="w-full h-full max-w-[1600px] mx-auto grid lg:grid-cols-12 gap-6">
           
           {/* Left Panel: Controls */}
           <div className="lg:col-span-3 flex flex-col gap-4 h-full overflow-y-auto pr-2 min-w-0">
             {/* 1. Mode Selection */}
-            <Card className="bg-card border-border">
+            <Card className="bg-card border-border" data-tour-id="mode-panel">
               <CardHeader className="pb-3">
                 <h2 className="text-lg font-semibold text-primary flex items-center gap-2">
                   Mode
@@ -1261,7 +1311,7 @@ export default function Index() {
             </Card>
 
             {/* 2. Select Image */}
-            <Card className="bg-card border-border">
+            <Card className="bg-card border-border" data-tour-id="image-panel">
               <CardHeader className="pb-3">
                 <h2 className="text-lg font-semibold text-primary">Select Image</h2>
               </CardHeader>
@@ -1327,7 +1377,7 @@ export default function Index() {
             </Card>
 
             {/* 3. Choose CFA */}
-            <Card className="bg-card border-border">
+            <Card className="bg-card border-border" data-tour-id="cfa-panel">
               <CardHeader className="pb-3">
                 <h2 className="text-lg font-semibold text-primary flex items-center gap-2">
                   Choose CFA
@@ -1367,7 +1417,7 @@ export default function Index() {
             </Card>
 
             {/* 4. Choose Algorithm */}
-            <Card className="bg-card border-border">
+            <Card className="bg-card border-border" data-tour-id="algorithm-panel">
               <CardHeader className="pb-3">
                 <h2 className="text-lg font-semibold text-primary">Choose Algorithm</h2>
               </CardHeader>
@@ -1678,7 +1728,7 @@ export default function Index() {
             )}
 
             {/* 6. View Setup */}
-            <Card className="bg-card border-border">
+            <Card className="bg-card border-border" data-tour-id="view-panel">
               <CardHeader className="pb-3">
                 <h2 className="text-lg font-semibold text-primary">View Setup</h2>
               </CardHeader>
@@ -1861,7 +1911,7 @@ export default function Index() {
           </div>
           
           {/* Center Panel: Canvas */}
-          <div className="lg:col-span-6 xl:col-span-5 flex flex-col h-full min-w-0 overflow-hidden">
+          <div className="lg:col-span-6 xl:col-span-5 flex flex-col h-full min-w-0 overflow-hidden" data-tour-id="canvas-panel">
             <Card className="h-full flex flex-col border-border shadow-sm bg-card overflow-hidden">
               <div className={`flex-1 relative min-w-0 min-h-0 overflow-hidden ${
                 comparisonMode && comparisonLayout === 'side-by-side' 
@@ -1925,7 +1975,7 @@ export default function Index() {
           </div>
 
           {/* Right Panel: Math & Inspector */}
-          <div className="lg:col-span-3 xl:col-span-4 h-full overflow-y-auto min-w-0">
+          <div className="lg:col-span-3 xl:col-span-4 h-full overflow-y-auto min-w-0" data-tour-id="math-panel">
             {/* If comparison mode, show condensed traces or tabs? For simplicity, show Tab 1 / Tab 2 */}
             {comparisonMode ? (
                 <div className="space-y-4">
