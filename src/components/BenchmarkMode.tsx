@@ -32,6 +32,7 @@ import { downsizeImageToDataURL } from '@/lib/imageResize';
 interface BenchmarkModeProps {
   uploadedImages?: Map<string, ImageData>; // Optional: uploaded images for benchmarking
   defaultParams?: DemosaicParams;
+  onBenchmarkRun?: () => void;
 }
 
 const DEFAULT_WIDTH = 512;
@@ -59,7 +60,7 @@ const ALL_ALGORITHMS: DemosaicAlgorithm[] = [
 
 const ALL_CFA_PATTERNS: CFAType[] = ['bayer', 'xtrans'];
 
-export function BenchmarkMode({ uploadedImages = new Map(), defaultParams }: BenchmarkModeProps) {
+export function BenchmarkMode({ uploadedImages = new Map(), defaultParams, onBenchmarkRun }: BenchmarkModeProps) {
   const [config, setConfig] = useState<BenchmarkConfig>({
     algorithms: [...ALL_ALGORITHMS],
     testImages: SYNTHETIC_PATTERNS.map(p => p.id),
@@ -473,7 +474,7 @@ export function BenchmarkMode({ uploadedImages = new Map(), defaultParams }: Ben
 
   return (
     <div className="space-y-6 p-6">
-      <Card>
+      <Card data-tour-id="benchmark-config">
         <CardHeader>
           <CardTitle>Benchmark Configuration</CardTitle>
         </CardHeader>
@@ -672,7 +673,11 @@ export function BenchmarkMode({ uploadedImages = new Map(), defaultParams }: Ben
 
           <div className="flex gap-2">
             <Button
-              onClick={runBenchmark}
+              data-tour-id="benchmark-run-btn"
+              onClick={() => {
+                runBenchmark();
+                onBenchmarkRun?.();
+              }}
               disabled={progress.isRunning || config.algorithms.length === 0 || config.testImages.length === 0}
             >
               <Play className="mr-2 h-4 w-4" />

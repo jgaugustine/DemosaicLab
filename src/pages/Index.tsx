@@ -26,7 +26,7 @@ import {
 } from '@/lib/demosaic';
 import { decodeDNG } from '@/lib/dngDecode';
 import { createZonePlate, createFineCheckerboard, createColorSweep, createStarburst, createDiagonalLines, createSineWaveGratings, createColorPatches, createColorFringes } from '@/lib/synthetic';
-import { Upload, Image as ImageIcon, FileCode, Grid3X3, ZoomIn, ZoomOut, RefreshCcw, Grid, Columns, Loader2, HelpCircle } from 'lucide-react';
+import { Upload, Image as ImageIcon, FileCode, Grid3X3, ZoomIn, ZoomOut, RefreshCcw, Grid, Columns, Loader2 } from 'lucide-react';
 import { downsizeImageToDataURL } from '@/lib/imageResize';
 import { HelpTooltip } from '@/components/ui/HelpTooltip';
 import { TutorialTour } from '@/components/TutorialTour';
@@ -127,6 +127,19 @@ export default function Index() {
   const closeTour = useCallback(() => {
     setTourStepId(null);
     try { sessionStorage.setItem(TOUR_SEEN_KEY, "1"); } catch {}
+  }, []);
+
+  const advanceTourOn = useCallback((event: import("@/config/tutorialSteps").TutorialEvent) => {
+    setTourStepId((prev) => {
+      if (!prev) return prev;
+      const step = tutorialSteps.find((s) => s.id === prev);
+      if (step?.advanceOn === event) {
+        const idx = tutorialSteps.findIndex((s) => s.id === prev);
+        if (idx >= 0 && idx < tutorialSteps.length - 1) return tutorialSteps[idx + 1].id;
+        return null;
+      }
+      return prev;
+    });
   }, []);
   
   // Helper to get algorithm display name (defined early to avoid initialization order issues)
@@ -384,16 +397,19 @@ export default function Index() {
   }, [isDragging1, isDragging2, isDragging3, isDragging4]);
 
   const handleZoomIn = () => {
+    advanceTourOn("zoom-changed");
     setIsFit(false);
     setZoom(z => Math.min(z * 1.5, 32));
   };
 
   const handleZoomOut = () => {
+    advanceTourOn("zoom-changed");
     setIsFit(false);
     setZoom(z => Math.max(z / 1.5, 0.1));
   };
 
   const toggleFit = () => {
+    advanceTourOn("zoom-changed");
     if (isFit) {
        setIsFit(false);
        setZoom(1);
@@ -402,9 +418,10 @@ export default function Index() {
     }
   };
 
-  const handleWheelZoom = (e: WheelEvent, source: 1 | 2 | 3 | 4) => {
+  const handleWheelZoom = (e: WheelEvent, _source: 1 | 2 | 3 | 4) => {
     if (!e.ctrlKey && !e.metaKey) return; // Only zoom with Ctrl/Cmd+Wheel
     e.preventDefault();
+    advanceTourOn("zoom-changed");
     setIsFit(false);
     const delta = e.deltaY > 0 ? 0.9 : 1.1;
     setZoom(z => Math.max(0.1, Math.min(32, z * delta)));
@@ -732,7 +749,7 @@ export default function Index() {
                       : "shadow-2xl border border-border block"}
                     style={!isFit ? { width: input.width * zoom, height: input.height * zoom } : undefined}
                     onPixelHover={(x, y) => setHoverPos(x >= 0 ? {x, y} : null)}
-                    onPixelClick={(x, y) => setSelectedPos({x, y})}
+                    onPixelClick={(x, y) => { setSelectedPos({x, y}); advanceTourOn("pixel-selected"); }}
                   />
                   <div className="absolute top-2 left-2 bg-background/80 backdrop-blur px-2 py-1 rounded text-[10px] font-mono border border-border z-10 pointer-events-none">
                     {label}
@@ -773,6 +790,7 @@ export default function Index() {
       height: imageData.height
     });
     setCfaType('bayer');
+    advanceTourOn("image-loaded");
   };
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -804,6 +822,7 @@ export default function Index() {
       const dngInput = await decodeDNG(file);
       setInput(dngInput);
       setCfaType('bayer');
+      advanceTourOn("image-loaded");
     } catch (err) {
       console.error("DNG Decode failed", err);
       const errorMessage = err instanceof Error ? err.message : "Failed to decode DNG. Ensure it's a valid raw file.";
@@ -1222,15 +1241,28 @@ export default function Index() {
   if (benchmarkMode) {
     return (
       <div className="h-screen bg-background text-foreground flex flex-col overflow-hidden">
+        <TutorialTour
+          steps={tutorialSteps}
+          currentStepId={tourStepId}
+          onNext={advanceTour}
+          onBack={backTour}
+          onSkip={closeTour}
+          onComplete={closeTour}
+        />
         <div className="border-b p-4 flex items-center justify-between">
           <h1 className="text-2xl font-bold">Benchmark Mode</h1>
-          <Button variant="outline" onClick={() => setBenchmarkMode(false)}>
+          <Button
+            variant="outline"
+            data-tour-id="benchmark-exit-btn"
+            onClick={() => { setBenchmarkMode(false); advanceTourOn("benchmark-exited"); }}
+          >
             Exit Benchmark Mode
           </Button>
         </div>
         <div className="flex-1 overflow-auto">
-          <BenchmarkMode 
+          <BenchmarkMode
             defaultParams={params}
+            onBenchmarkRun={() => advanceTourOn("benchmark-run")}
           />
         </div>
       </div>
@@ -1247,20 +1279,29 @@ export default function Index() {
         onSkip={closeTour}
         onComplete={closeTour}
       />
-      <div className="flex items-center justify-between px-4 pt-2 pb-1">
-        <span className="text-lg font-bold">DemosaicLab</span>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => {
-            try { sessionStorage.removeItem(TOUR_SEEN_KEY); } catch {}
-            setTourStepId(getFirstTutorialStepId());
-          }}
-          title="Start tour"
-        >
-          <HelpCircle className="w-5 h-5" />
-        </Button>
-      </div>
+      <header className="shrink-0 border-b bg-background px-4 py-2">
+        <div className="flex items-center gap-2">
+          <a
+            href="/"
+            className="text-sm text-muted-foreground hover:text-foreground"
+          >
+            ← Back to Capstone
+          </a>
+          <span className="text-lg font-bold ml-4">DemosaicLab</span>
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              type="button"
+              className="inline-flex items-center rounded-md border border-border bg-background px-3 py-1 text-xs font-medium text-foreground shadow-sm hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              onClick={() => {
+                try { sessionStorage.removeItem(TOUR_SEEN_KEY); } catch {}
+                setTourStepId(getFirstTutorialStepId());
+              }}
+            >
+              Guided tour
+            </button>
+          </div>
+        </div>
+      </header>
       <main className="flex-1 p-4 lg:p-6 min-h-0 pt-2">
         <div className="w-full h-full max-w-[1600px] mx-auto grid lg:grid-cols-12 gap-6">
           
@@ -1300,13 +1341,15 @@ export default function Index() {
                     Real Raw
                   </ToggleGroupItem>
                 </ToggleGroup>
-                <Button 
-                  variant="outline" 
-                  className="w-full mt-3 !text-xs"
-                  onClick={() => setBenchmarkMode(true)}
-                >
-                  Benchmark Mode
-                </Button>
+                <div data-tour-id="benchmark-btn">
+                  <Button 
+                    variant="outline" 
+                    className="w-full mt-3 !text-xs"
+                    onClick={() => { setBenchmarkMode(true); advanceTourOn("benchmark-opened"); }}
+                  >
+                    Benchmark Mode
+                  </Button>
+                </div>
               </CardContent>
             </Card>
 
@@ -1391,6 +1434,7 @@ export default function Index() {
                   onValueChange={(v) => {
                     if (v && (v === 'bayer' || v === 'xtrans')) {
                       setCfaType(v as CFAType);
+                      advanceTourOn("cfa-changed");
                     }
                   }}
                   disabled={input?.mode === 'raw'}
@@ -1424,7 +1468,7 @@ export default function Index() {
               <CardContent className="space-y-4">
                 <div className="space-y-2">
                   <label className="text-xs font-medium text-primary">Algorithm A</label>
-                  <Select value={algorithm} onValueChange={(v) => setAlgorithm(v as DemosaicAlgorithm)}>
+                  <Select value={algorithm} onValueChange={(v) => { setAlgorithm(v as DemosaicAlgorithm); advanceTourOn("algorithm-changed"); }}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="nearest">Nearest Neighbor</SelectItem>
@@ -1748,6 +1792,7 @@ export default function Index() {
                     onValueChange={(v) => {
                       if (v && (v === 'original' || v === 'cfa' || v === 'reconstruction')) {
                         setViewMode(v);
+                        advanceTourOn("view-mode-changed");
                       }
                     }}
                     className="w-full"
@@ -1784,13 +1829,13 @@ export default function Index() {
                       <Columns className="w-3 h-3" />
                       Comparison Mode
                     </label>
-                    <Switch checked={comparisonMode} onCheckedChange={setComparisonMode} />
+                    <Switch checked={comparisonMode} onCheckedChange={(checked) => { setComparisonMode(checked); if (checked) advanceTourOn("comparison-enabled"); }} />
                   </div>
                   {comparisonMode && (
                     <div className="space-y-3 animate-in fade-in slide-in-from-top-2">
-                      <div className="space-y-2">
+                      <div className="space-y-2" data-tour-id="comparison-layout">
                         <label className="text-xs font-medium">Layout</label>
-                        <Select value={comparisonLayout} onValueChange={(v: 'side-by-side' | '4-up') => setComparisonLayout(v)}>
+                        <Select value={comparisonLayout} onValueChange={(v: 'side-by-side' | '4-up') => { setComparisonLayout(v); advanceTourOn("comparison-layout-changed"); }}>
                           <SelectTrigger><SelectValue /></SelectTrigger>
                           <SelectContent>
                             <SelectItem value="side-by-side">Side-by-Side</SelectItem>
@@ -1798,12 +1843,13 @@ export default function Index() {
                           </SelectContent>
                         </Select>
                       </div>
-                      <div className="space-y-2">
+                      <div className="space-y-2" data-tour-id="comparison-preset">
                         <label className="text-xs font-medium">Comparison Preset</label>
                         <Select 
                           value={comparisonPreset} 
                           onValueChange={(v: ComparisonPreset) => {
                             setComparisonPreset(v);
+                            advanceTourOn("comparison-preset-changed");
                             if (v !== 'custom') {
                               // Auto-update configs when preset changes
                               const configs = getPresetConfigs(v, comparisonLayout, !!hasGroundTruth);
@@ -1960,7 +2006,7 @@ export default function Index() {
               )}
               </div>
               
-              <div className="h-12 border-t bg-card flex items-center justify-between px-4 shrink-0">
+              <div className="h-12 border-t bg-card flex items-center justify-between px-4 shrink-0" data-tour-id="zoom-bar">
                  <div className="flex items-center gap-2">
                     <span className="text-xs text-muted-foreground">Zoom:</span>
                     <Button variant="ghost" size="icon" className="h-8 w-8" onClick={handleZoomOut}><ZoomOut className="w-4 h-4" /></Button>

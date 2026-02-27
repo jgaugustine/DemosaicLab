@@ -62,9 +62,11 @@ export const TutorialTour = ({
     };
     window.addEventListener("resize", handle);
     window.addEventListener("scroll", handle, true);
+    const interval = setInterval(handle, 500);
     return () => {
       window.removeEventListener("resize", handle);
       window.removeEventListener("scroll", handle, true);
+      clearInterval(interval);
     };
   }, [step]);
 
@@ -75,9 +77,11 @@ export const TutorialTour = ({
   const index = steps.findIndex((s) => s.id === step.id);
   const isFirst = index <= 0;
   const isLast = index === totalSteps - 1;
+  const hasAdvanceOn = !!step.advanceOn;
 
   const viewportWidth = window.innerWidth;
   const viewportHeight = window.innerHeight;
+  const PAD = 8;
 
   let cardTop = viewportHeight / 2;
   let cardLeft = viewportWidth / 2;
@@ -85,7 +89,7 @@ export const TutorialTour = ({
 
   if (targetRect && !useCenteredLayout) {
     const spacing = 16;
-    const estimatedCardHeight = 200;
+    const estimatedCardHeight = 220;
     const belowSpace = viewportHeight - (targetRect.top + targetRect.height);
     const aboveSpace = targetRect.top;
 
@@ -118,26 +122,40 @@ export const TutorialTour = ({
   const body = typeof step.body === "string" ? step.body : step.body;
 
   const content = (
-    <div
-      className="pointer-events-none fixed inset-0 z-40"
-      role="dialog"
-      aria-modal="false"
-      aria-label={step.title}
-    >
-      {targetRect && !useCenteredLayout && (
-        <div
-          className="pointer-events-none absolute rounded-lg border-2 border-primary/80 bg-transparent shadow-[0_0_0_9999px_rgba(15,23,42,0.65)]"
-          style={{
-            top: targetRect.top,
-            left: targetRect.left,
-            width: targetRect.width,
-            height: targetRect.height,
-          }}
-        />
+    <>
+      {/* Backdrop quadrants — four rects around the highlighted element so the
+          element itself remains clickable (pointer-events pass through). */}
+      {targetRect && !useCenteredLayout ? (
+        <div className="fixed inset-0 z-40 pointer-events-none" role="presentation">
+          {/* top */}
+          <div className="pointer-events-auto absolute bg-slate-900/65" style={{ top: 0, left: 0, right: 0, height: Math.max(0, targetRect.top - PAD) }} />
+          {/* bottom */}
+          <div className="pointer-events-auto absolute bg-slate-900/65" style={{ top: targetRect.top + targetRect.height + PAD, left: 0, right: 0, bottom: 0 }} />
+          {/* left */}
+          <div className="pointer-events-auto absolute bg-slate-900/65" style={{ top: Math.max(0, targetRect.top - PAD), left: 0, width: Math.max(0, targetRect.left - PAD), height: targetRect.height + PAD * 2 }} />
+          {/* right */}
+          <div className="pointer-events-auto absolute bg-slate-900/65" style={{ top: Math.max(0, targetRect.top - PAD), left: targetRect.left + targetRect.width + PAD, right: 0, height: targetRect.height + PAD * 2 }} />
+          {/* highlight border */}
+          <div
+            className="pointer-events-none absolute rounded-lg border-2 border-primary/80"
+            style={{
+              top: targetRect.top - PAD,
+              left: targetRect.left - PAD,
+              width: targetRect.width + PAD * 2,
+              height: targetRect.height + PAD * 2,
+            }}
+          />
+        </div>
+      ) : (
+        <div className="fixed inset-0 z-40 bg-slate-900/65 pointer-events-auto" role="presentation" />
       )}
 
+      {/* Tooltip card */}
       <div
-        className="pointer-events-auto absolute max-w-sm rounded-lg border border-border bg-popover/95 p-4 shadow-lg backdrop-blur-sm"
+        className="fixed z-50 pointer-events-auto max-w-sm rounded-lg border border-border bg-popover/95 p-4 shadow-lg backdrop-blur-sm"
+        role="dialog"
+        aria-modal="false"
+        aria-label={step.title}
         style={{
           top: useCenteredLayout ? "50%" : cardTop,
           left: useCenteredLayout ? "50%" : cardLeft,
@@ -149,6 +167,13 @@ export const TutorialTour = ({
         </div>
         <h2 className="mb-2 text-base font-semibold text-foreground">{step.title}</h2>
         <div className="mb-4 text-sm text-muted-foreground">{body}</div>
+
+        {hasAdvanceOn && (
+          <div className="mb-3 text-xs font-medium text-primary animate-pulse">
+            Complete the action above to advance, or press Next.
+          </div>
+        )}
+
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <Button
@@ -180,7 +205,7 @@ export const TutorialTour = ({
           </div>
         </div>
       </div>
-    </div>
+    </>
   );
 
   return createPortal(content, document.body);
